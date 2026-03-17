@@ -1,0 +1,17 @@
+{
+  "name": "variationmgr-web-portal-server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch src/index.js",
+    "start": "node src/index.js",
+    "seed": "node src/seed.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.0.0",
+    "cors": "^2.8.5",
+    "express": "^5.0.0",
+    "nanoid": "^5.0.0"
+  }
+}

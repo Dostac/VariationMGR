@@ -1,0 +1,81 @@
+{
+  "template_id": "example-room",
+  "display_name": "Example Living Room",
+  "description": "A demo template showing how to configure floors, wall colors, and furniture styles. Replace this with your actual scene.",
+  "scene_file": "//vb_nas/nas/path/to/your/scene.max",
+  "proxy_gltf": "proxy.glb",
+  "preview_images": ["previews/thumb.jpg"],
+
+  "variation_schema": {
+    "scheme": "{Scene}_{Row}_{Camera}",
+    "render_camera_mode": "all",
+    "render_camera_column": "",
+    "ops_folder": "//vb_nas/nas/Database/3ds_Max/Plugins_Scripts/VirtualBuilders/VariationMGR/Operators",
+    "headers": ["Floor", "Wall Color", "Furniture"],
+
+    "columns": {
+      "Floor": {
+        "type": "enum",
+        "label": "Flooring Material",
+        "options": ["Oak", "Walnut", "Marble", "Concrete"],
+        "default": "Oak",
+        "description": "The floor surface material applied via MatFromFolder operator"
+      },
+      "Wall Color": {
+        "type": "hex_color",
+        "label": "Wall Paint Color",
+        "default": "#FFFFFF",
+        "description": "Wall color applied via HexColor operator"
+      },
+      "Furniture": {
+        "type": "enum",
+        "label": "Furniture Style",
+        "options": ["Modern", "Classic", "Minimal"],
+        "default": "Modern",
+        "description": "Which furniture layer to show via LayerVisibility operator"
+      }
+    },
+
+    "operators": [
+      {
+        "class_name": "MatFromFolderOperator",
+        "settings": {
+          "source_material_name": "Floor_Material",
+          "texture_folder": "//vb_nas/nas/textures/floors",
+          "target_object_name": "Floor_Object",
+          "mapped_column": "Floor"
+        },
+        "ops_folder": "//vb_nas/nas/Database/3ds_Max/Plugins_Scripts/VirtualBuilders/VariationMGR/Operators"
+      },
+      {
+        "class_name": "HexColorOperator",
+        "settings": {
+          "target_map_name": "Wall_CoronaColor",
+          "mapped_column": "Wall Color"
+        },
+        "ops_folder": "//vb_nas/nas/Database/3ds_Max/Plugins_Scripts/VirtualBuilders/VariationMGR/Operators"
+      },
+      {
+        "class_name": "LayerVisibilityOperator",
+        "settings": {
+          "parent_layer_name": "Furniture_Styles",
+          "mapped_column": "Furniture"
+        },
+        "ops_folder": "//vb_nas/nas/Database/3ds_Max/Plugins_Scripts/VirtualBuilders/VariationMGR/Operators"
+      }
+    ],
+
+    "row_defaults": [
+      ["Oak", "#FFFFFF", "Modern"]
+    ],
+    "max_rows": 20
+  },
+
+  "render_presets": {
+    "draft":    { "resolution": 2000, "pass_limit": 25,  "noise_limit": 8.0 },
+    "standard": { "resolution": 4000, "pass_limit": 75,  "noise_limit": 6.0 },
+    "high":     { "resolution": 6000, "pass_limit": 150, "noise_limit": 3.0 }
+  },
+
+  "output_formats": ["jpg", "png", "exr"]
+}

@@ -1,0 +1,8 @@
+packaging/
+dist/
+dist_new/
+build*/
+__pycache__/
+*.pyc
+*.pyo
+legacy/

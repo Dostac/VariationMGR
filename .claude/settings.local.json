@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find:*)",
+      "Read(///vb_nas/nas/Database/3ds_Max/Plugins_Scripts/VirtualBuilders/VariationMGR/**)",
+      "Bash(ls \"//vb_nas/nas/Database/3ds_Max/Plugins_Scripts/VirtualBuilders/VariationMGR/dist/\")",
+      "Bash(ls \"//vb_nas/nas/Database/3ds_Max/Plugins_Scripts/VirtualBuilders/VariationMGR/build/\")",
+      "Bash(ls -la \"//vb_nas/nas/Database/3ds_Max/Plugins_Scripts/VirtualBuilders/VariationMGR/dist/VBWorker/\")",
+      "Bash(ls -la \"//vb_nas/nas/Database/3ds_Max/Plugins_Scripts/VirtualBuilders/VariationMGR/dist/VBWorkerUI/\")",
+      "Bash(mkdir -p \"//vb_nas/nas/Database/3ds_Max/Plugins_Scripts/VirtualBuilders/VariationMGR/web-portal/client/src/components\")",
+      "Bash(mkdir -p \"//vb_nas/nas/Database/3ds_Max/Plugins_Scripts/VirtualBuilders/VariationMGR/web-portal/client/src/api\")",
+      "Bash(du -sh *)",
+      "Bash(ls -la *.py)",
+      "Bash(grep -r batchrenderer_core vb_nasnasDatabase3ds_MaxPlugins_ScriptsVirtualBuildersVariationMGR --include=*.py)",
+      "Bash(grep -r variation_core vb_nasnasDatabase3ds_MaxPlugins_ScriptsVirtualBuildersVariationMGR --include=*.py)",
+      "Bash(git config:*)"
+    ]
+  }
+}
