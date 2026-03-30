@@ -38,6 +38,8 @@ class VariationManager(QtWidgets.QDialog):
         self.active_ops_instances = []
         self.render_camera_mode = "active"   # "active" | "column"
         self.render_camera_column = ""
+        self.render_range_start = 0   # 0 = from beginning
+        self.render_range_end = 0     # 0 = to end
         self._csv_watcher = None
         self._csv_temp_path = None
         
@@ -75,6 +77,8 @@ class VariationManager(QtWidgets.QDialog):
         def _mat_button(btn, min_w=100):
             btn.setMinimumHeight(40)
             btn.setMinimumWidth(min_w)
+            btn.setDefault(False)
+            btn.setAutoDefault(False)
             return btn
 
         fixed_v_policy = QtWidgets.QSizePolicy(
@@ -99,7 +103,6 @@ class VariationManager(QtWidgets.QDialog):
         self.edt_pattern = QLineEdit("{Scene}_{Row}_{Camera}")
         self.edt_pattern.setMinimumHeight(40)
         self.edt_pattern.setFocusPolicy(QtCore.Qt.ClickFocus)
-        self.edt_pattern.returnPressed.connect(lambda: None)
 
         self.cb_prop_tokens = QComboBox()
         self.cb_prop_tokens.setMinimumHeight(40)
@@ -107,6 +110,7 @@ class VariationManager(QtWidgets.QDialog):
         self.btn_insert_prop = QPushButton("Insert Property")
         self.btn_insert_prop.setMinimumHeight(40)
         self.btn_insert_prop.setDefault(False)
+        self.btn_insert_prop.setAutoDefault(False)
         self.btn_insert_prop.setFocusPolicy(QtCore.Qt.NoFocus)
         self.btn_insert_prop.clicked.connect(self.insert_prop_token)
 
@@ -133,8 +137,8 @@ class VariationManager(QtWidgets.QDialog):
         naming_vbox.addLayout(token_row)
         naming_vbox.addWidget(self.lbl_preview)
 
-        # B. Camera
-        cam_group = QGroupBox("Render Camera")
+        # B. Render Settings
+        cam_group = QGroupBox("Render Settings")
         cam_group.setSizePolicy(fixed_v_policy)
         cam_vbox = QVBoxLayout(cam_group)
         cam_vbox.setContentsMargins(16, 16, 16, 16)
@@ -159,6 +163,33 @@ class VariationManager(QtWidgets.QDialog):
         cam_vbox.addWidget(self.radio_cam_active)
         cam_vbox.addWidget(self.radio_cam_all)
         cam_vbox.addLayout(col_row)
+
+        sep_render = QtWidgets.QFrame()
+        sep_render.setFrameShape(QtWidgets.QFrame.HLine)
+        cam_vbox.addWidget(sep_render)
+        cam_vbox.addSpacing(4)
+
+        cam_vbox.addWidget(QLabel("Row Range (0 = all, header = row 1, data starts at row 2):"))
+        range_row = QHBoxLayout()
+        range_row.setSpacing(8)
+        range_row.addWidget(QLabel("From:"))
+        self.spn_range_start = QtWidgets.QSpinBox()
+        self.spn_range_start.setRange(0, 99999)
+        self.spn_range_start.setSpecialValueText("all")
+        self.spn_range_start.setValue(0)
+        self.spn_range_start.setMinimumHeight(32)
+        self.spn_range_start.setFixedWidth(80)
+        range_row.addWidget(self.spn_range_start)
+        range_row.addWidget(QLabel("To:"))
+        self.spn_range_end = QtWidgets.QSpinBox()
+        self.spn_range_end.setRange(0, 99999)
+        self.spn_range_end.setSpecialValueText("all")
+        self.spn_range_end.setValue(0)
+        self.spn_range_end.setMinimumHeight(32)
+        self.spn_range_end.setFixedWidth(80)
+        range_row.addWidget(self.spn_range_end)
+        range_row.addStretch()
+        cam_vbox.addLayout(range_row)
 
         top_layout.addWidget(naming_group, stretch=2)
         top_layout.addWidget(cam_group, stretch=1)
@@ -223,6 +254,9 @@ class VariationManager(QtWidgets.QDialog):
         self.table.customContextMenuRequested.connect(lambda pos: None)
         self.table.horizontalHeader().customContextMenuRequested.connect(self.show_column_menu)
         self.table.verticalHeader().customContextMenuRequested.connect(self.show_row_menu)
+        # Keep row numbers in sync with the header=row1 / data=row2 convention.
+        self.table.model().rowsInserted.connect(self._update_row_headers)
+        self.table.model().rowsRemoved.connect(self._update_row_headers)
 
         data_layout.addLayout(toolbar)
         data_layout.addWidget(self.table)
@@ -245,11 +279,6 @@ class VariationManager(QtWidgets.QDialog):
         _mat_button(self.btn_add_tab, 140)
         op_bar.addWidget(self.btn_add_tab)
 
-        self.btn_run_row = QPushButton("▶ RUN SELECTED ROW")
-        self.btn_run_row.setMinimumHeight(40)
-        self.btn_run_row.setMinimumWidth(200)
-        op_bar.addWidget(self.btn_run_row)
-
         self.tabs = QTabWidget()
         self.tabs.setDocumentMode(True)
         self.tabs.setTabsClosable(True)
@@ -267,10 +296,12 @@ class VariationManager(QtWidgets.QDialog):
 
         # --- BOTTOM BAR ---
         bottom_bar = QHBoxLayout()
-        self.btn_batch_render = QPushButton("▶  Open batch Renderer")
-        self.btn_batch_render.setMinimumHeight(40)
-        self.btn_batch_render.setMinimumWidth(160)
+        self.btn_run_row = QPushButton("▶ Run Selected Row")
+        _mat_button(self.btn_run_row, 180)
+        self.btn_batch_render = QPushButton("▶  Open Batch Renderer")
+        _mat_button(self.btn_batch_render, 180)
         bottom_bar.addStretch()
+        bottom_bar.addWidget(self.btn_run_row)
         bottom_bar.addWidget(self.btn_batch_render)
 
         root.addLayout(top_layout)
@@ -293,6 +324,10 @@ class VariationManager(QtWidgets.QDialog):
         self.radio_cam_column.toggled.connect(lambda c: self._on_cam_mode_toggled("column", c))
         self.radio_cam_all.toggled.connect(lambda c: self._on_cam_mode_toggled("all", c))
         self.combo_cam_column.currentTextChanged.connect(lambda t: setattr(self, 'render_camera_column', t))
+        self.spn_range_start.valueChanged.connect(lambda v: setattr(self, 'render_range_start', v))
+        self.spn_range_end.valueChanged.connect(lambda v: setattr(self, 'render_range_end', v))
+        self.spn_range_start.editingFinished.connect(self._clamp_range_start)
+        self.spn_range_end.editingFinished.connect(self._clamp_range_end)
         self.columns_changed.connect(self._on_cam_columns_changed)
 
     def create_separator(self):
@@ -445,6 +480,26 @@ class VariationManager(QtWidgets.QDialog):
 
     # --- SAVE / LOAD SYSTEM (SCENE ONLY) ---
 
+    def _scene_dir(self):
+        """Return the directory of the currently open .max file, or '' if unsaved."""
+        try:
+            d = str(rt.maxFilePath).strip()
+            return d if d else ""
+        except Exception:
+            return ""
+
+    def _scene_default_save_path(self, ext):
+        """Return '<scene_dir>\\<scene_name_without_ext><ext>', or '' if unsaved."""
+        try:
+            d = str(rt.maxFilePath).strip()
+            n = str(rt.maxFileName).strip()
+            if not d or not n:
+                return ""
+            base = os.path.splitext(n)[0]
+            return os.path.normpath(os.path.join(d, base + ext))
+        except Exception:
+            return ""
+
     def _build_current_data(self):
         hdr = self.table.horizontalHeader()
         headers = [self.table.horizontalHeaderItem(hdr.logicalIndex(v)).text()
@@ -473,6 +528,8 @@ class VariationManager(QtWidgets.QDialog):
             "scheme": self.edt_pattern.text(),
             "render_camera_mode": self.render_camera_mode,
             "render_camera_column": self.render_camera_column,
+            "render_range_start": self.render_range_start,
+            "render_range_end": self.render_range_end,
             "ops_folder": self.ops_folder,
             "headers": headers,
             "rows": rows,
@@ -523,6 +580,11 @@ class VariationManager(QtWidgets.QDialog):
                     else:
                         self.radio_cam_active.setChecked(True)
 
+                    self.render_range_start = data.get("render_range_start", 0)
+                    self.render_range_end = data.get("render_range_end", 0)
+                    self.spn_range_start.setValue(self.render_range_start)
+                    self.spn_range_end.setValue(self.render_range_end)
+
                     headers = data.get("headers", [])
                     self.table.setColumnCount(len(headers))
                     self.table.setHorizontalHeaderLabels(headers)
@@ -562,6 +624,7 @@ class VariationManager(QtWidgets.QDialog):
                 break
         
         self.update_prop_dropdown()
+        self.columns_changed.emit(self.custom_properties)
         self.update_naming_preview()
         return loaded_data
 
@@ -609,9 +672,24 @@ class VariationManager(QtWidgets.QDialog):
         while self.tabs.count() > 0:
             self.remove_operator_tab(0)
         self.update_prop_dropdown()
+        self.columns_changed.emit(self.custom_properties)
         print("VM: Scene data cleared.")
 
     # --- HELPERS ---
+
+    def _update_row_headers(self, *_):
+        """Set vertical header labels so header=row 1, first data row=row 2."""
+        for i in range(self.table.rowCount()):
+            self.table.setVerticalHeaderItem(i, QTableWidgetItem(str(i + 2)))
+
+    def _clamp_range_start(self):
+        if self.spn_range_start.value() == 1:
+            self.spn_range_start.setValue(2)
+
+    def _clamp_range_end(self):
+        if self.spn_range_end.value() == 1:
+            self.spn_range_end.setValue(2)
+
     def add_row(self):
         self.table.insertRow(self.table.rowCount())
 
@@ -772,7 +850,8 @@ class VariationManager(QtWidgets.QDialog):
     
     def import_csv(self):
         self._cleanup_csv_watcher()
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Open CSV", "", "CSV Files (*.csv)")
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Open CSV", self._scene_default_save_path(".csv"), "CSV Files (*.csv)")
         if not path: return
         with open(path, newline='') as f:
             reader = list(csv.reader(f))
@@ -808,7 +887,8 @@ class VariationManager(QtWidgets.QDialog):
         if self.table.columnCount() == 0:
             QMessageBox.warning(self, "Export CSV", "Nothing to export — the table is empty.")
             return
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save CSV", "", "CSV Files (*.csv)")
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Save CSV", self._scene_default_save_path(".csv"), "CSV Files (*.csv)")
         if not path:
             return
         if not path.lower().endswith(".csv"):
@@ -900,7 +980,7 @@ class VariationManager(QtWidgets.QDialog):
 
     def export_json_config(self):
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "Export Variation Config", "", "JSON Files (*.json)")
+            self, "Export Variation Config", self._scene_default_save_path(".json"), "JSON Files (*.json)")
         if not path:
             return
         if not path.lower().endswith(".json"):
@@ -912,7 +992,7 @@ class VariationManager(QtWidgets.QDialog):
 
     def import_json_config(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "Import Variation Config", "", "JSON Files (*.json)")
+            self, "Import Variation Config", self._scene_default_save_path(".json"), "JSON Files (*.json)")
         if not path:
             return
         try:
@@ -940,6 +1020,11 @@ class VariationManager(QtWidgets.QDialog):
             self.radio_cam_all.setChecked(True)
         else:
             self.radio_cam_active.setChecked(True)
+
+        self.render_range_start = data.get("render_range_start", 0)
+        self.render_range_end = data.get("render_range_end", 0)
+        self.spn_range_start.setValue(self.render_range_start)
+        self.spn_range_end.setValue(self.render_range_end)
 
         headers = data.get("headers", [])
         self.table.setColumnCount(len(headers))

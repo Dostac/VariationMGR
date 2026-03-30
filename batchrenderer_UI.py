@@ -25,12 +25,14 @@ class BatchRenderDialog(QtWidgets.QDialog):
         self._is_initializing = True
 
         self.setWindowTitle("VB Batch Renderer")
-        self.resize(720, 1300)
+        self.setMinimumWidth(1000)
+        self.resize(1000, 1300)
         self.setWindowFlags(QtCore.Qt.WindowType.Tool)
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
         qtmax.DisableMaxAcceleratorsOnFocus(self, True)
 
-        # Each entry: {"path": str, "var_json": str}
+        # Each entry: {"path": str, "var_json": str, "csv_file": str, "split_size": int,
+        #              "row_start": int, "row_end": int}
         self.file_entries = []
         self.format_prefs = {
             "jpg": [0, False],
@@ -46,6 +48,7 @@ class BatchRenderDialog(QtWidgets.QDialog):
         scroll = QtWidgets.QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         outer.addWidget(scroll)
 
         _container = QtWidgets.QWidget()
@@ -81,12 +84,13 @@ class BatchRenderDialog(QtWidgets.QDialog):
         fl = _group_vbox(gb_files)
 
         self.tree_widget = QtWidgets.QTreeWidget()
-        self.tree_widget.setColumnCount(2)
-        self.tree_widget.setHeaderLabels(["Scene File", "Variation Data"])
+        self.tree_widget.setColumnCount(3)
+        self.tree_widget.setHeaderLabels(["Scene File", "Variation Data", "CSV Override"])
         hdr = self.tree_widget.header()
         hdr.setStretchLastSection(False)
         hdr.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Stretch)
         hdr.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         self.tree_widget.setSelectionMode(
             QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
         self.tree_widget.setMinimumHeight(120)
@@ -96,12 +100,20 @@ class BatchRenderDialog(QtWidgets.QDialog):
 
         file_bar = QtWidgets.QHBoxLayout()
         file_bar.setSpacing(8)
-        self.btn_add        = _ctrl(QtWidgets.QPushButton("＋ Add Files"))
+        self.btn_add         = _ctrl(QtWidgets.QPushButton("＋ Add Files"))
         self.btn_assign_json = _ctrl(QtWidgets.QPushButton("📄 Assign JSON"))
+        self.btn_assign_csv  = _ctrl(QtWidgets.QPushButton("📊 Assign CSV"))
+        self.btn_split_jobs  = _ctrl(QtWidgets.QPushButton("✂ Split for Server"))
+        self.btn_split_jobs.setToolTip(
+            "Split variation rows into multiple server jobs.\n"
+            "Requires a Variation JSON or CSV override to be assigned first.")
+        self.btn_split_jobs.setEnabled(False)
         self.btn_remove     = _ctrl(QtWidgets.QPushButton("− Remove"))
         self.btn_clear      = _ctrl(QtWidgets.QPushButton("✕ Clear"))
         file_bar.addWidget(self.btn_add)
         file_bar.addWidget(self.btn_assign_json)
+        file_bar.addWidget(self.btn_assign_csv)
+        file_bar.addWidget(self.btn_split_jobs)
         file_bar.addWidget(self.btn_remove)
         file_bar.addStretch()
         file_bar.addWidget(self.btn_clear)
@@ -192,10 +204,25 @@ class BatchRenderDialog(QtWidgets.QDialog):
             "When enabled, camera mode and output naming are driven by the\n"
             "VariationManagerData embedded in each scene file.\n"
             "If no data is found the Fallback Camera Mode above is used.\n"
-            "Use '📄 Assign JSON' in the queue to override per-scene variation data.")
+            "Use '📄 Assign JSON' or '📊 Assign CSV' in the queue to override data.")
         lbl_var_hint.setStyleSheet("color: #888; font-style: italic;")
         lbl_var_hint.setWordWrap(True)
         var_vbox.addWidget(lbl_var_hint)
+
+        sep_var = QtWidgets.QFrame()
+        sep_var.setFrameShape(QtWidgets.QFrame.Shape.HLine)
+        var_vbox.addWidget(sep_var)
+        var_vbox.addSpacing(4)
+
+        br_range_btn_row = QtWidgets.QHBoxLayout()
+        br_range_btn_row.setSpacing(8)
+        br_range_btn_row.addWidget(QtWidgets.QLabel("Row Range (per file):"))
+        self.btn_set_range = _ctrl(QtWidgets.QPushButton("📐 Set Range..."))
+        self.btn_clear_range = _ctrl(QtWidgets.QPushButton("Clear Range"))
+        br_range_btn_row.addWidget(self.btn_set_range)
+        br_range_btn_row.addWidget(self.btn_clear_range)
+        br_range_btn_row.addStretch()
+        var_vbox.addLayout(br_range_btn_row)
 
         main_layout.addWidget(gb_var)
 
@@ -298,6 +325,11 @@ class BatchRenderDialog(QtWidgets.QDialog):
         # ------------------------------------------------------------------
         self.btn_add.clicked.connect(self.add_files)
         self.btn_assign_json.clicked.connect(self._assign_var_json)
+        self.btn_assign_csv.clicked.connect(self._assign_csv_override)
+        self.btn_split_jobs.clicked.connect(self._split_for_server)
+        self.btn_set_range.clicked.connect(self._set_row_range)
+        self.btn_clear_range.clicked.connect(self._clear_row_range)
+        self.tree_widget.itemSelectionChanged.connect(self._update_split_button_state)
         self.btn_remove.clicked.connect(self.remove_files)
         self.btn_clear.clicked.connect(self.clear_files)
         self.btn_browse.clicked.connect(self.browse_path)
@@ -504,22 +536,44 @@ class BatchRenderDialog(QtWidgets.QDialog):
     # FILES / QUEUE
     # -----------------------------------------------------------------------
 
-    def _make_tree_item(self, path, var_json=""):
+    def _make_tree_item(self, path, entry=None):
         """Create a QTreeWidgetItem for one file entry."""
         item = QtWidgets.QTreeWidgetItem()
         item.setText(0, os.path.basename(path))
         item.setToolTip(0, path)
-        self._refresh_tree_item(item, var_json)
+        self._refresh_tree_item(item, entry or {})
         return item
 
-    def _refresh_tree_item(self, item, var_json):
-        """Update the Variation Data column of a tree item from var_json path."""
+    def _refresh_tree_item(self, item, entry):
+        """Update Variation Data and CSV Override columns from an entry dict."""
+        var_json   = entry.get("var_json", "")
+        csv_file   = entry.get("csv_file", "")
+        split_size = entry.get("split_size", 0)
+        row_start  = entry.get("row_start", 0)
+        row_end    = entry.get("row_end", 0)
+
+        # Column 1: Variation Data + range/split indicators
         if var_json:
-            item.setText(1, os.path.basename(var_json))
+            label = os.path.basename(var_json)
             item.setToolTip(1, var_json)
         else:
-            item.setText(1, "(scene data)")
+            label = "(scene data)"
             item.setToolTip(1, "Uses VariationManagerData embedded in the .max file")
+        if row_start > 0 or row_end > 0:
+            r_s = row_start or 2
+            r_e = row_end or "end"
+            label += f" [{r_s}\u2013{r_e}]"
+        if split_size > 0:
+            label += f" [\u2702 {split_size}/job]"
+        item.setText(1, label)
+
+        # Column 2: CSV Override
+        if csv_file:
+            item.setText(2, os.path.basename(csv_file))
+            item.setToolTip(2, csv_file)
+        else:
+            item.setText(2, "")
+            item.setToolTip(2, "")
 
     def add_files(self):
         files, _ = QtWidgets.QFileDialog.getOpenFileNames(
@@ -529,9 +583,10 @@ class BatchRenderDialog(QtWidgets.QDialog):
         for f in files:
             f = f.replace("\\", "/")
             if f not in existing_paths:
-                entry = {"path": f, "var_json": ""}
+                entry = {"path": f, "var_json": "", "csv_file": "", "split_size": 0,
+                         "row_start": 0, "row_end": 0}
                 self.file_entries.append(entry)
-                self.tree_widget.addTopLevelItem(self._make_tree_item(f))
+                self.tree_widget.addTopLevelItem(self._make_tree_item(f, entry))
                 existing_paths.add(f)
                 added = True
         if added:
@@ -564,15 +619,19 @@ class BatchRenderDialog(QtWidgets.QDialog):
         if not selected:
             self.log("Select one or more scenes in the queue first.")
             return
+        selected_rows = self._selected_row_indices()
+        default_dir = (os.path.dirname(self.file_entries[selected_rows[0]]["path"])
+                       if selected_rows else "")
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "Select Variation Data JSON", "", "JSON Files (*.json)")
+            self, "Select Variation Data JSON", default_dir, "JSON Files (*.json)")
         if not path:
             return
         path = path.replace("\\", "/")
         selected_rows = self._selected_row_indices()
         for i in selected_rows:
             self.file_entries[i]["var_json"] = path
-            self._refresh_tree_item(self.tree_widget.topLevelItem(i), path)
+            self._refresh_tree_item(self.tree_widget.topLevelItem(i), self.file_entries[i])
+        self._update_split_button_state()
         self.save_ini()
 
     def _clear_var_json(self):
@@ -581,9 +640,177 @@ class BatchRenderDialog(QtWidgets.QDialog):
         if not selected_rows:
             return
         for i in selected_rows:
-            self.file_entries[i]["var_json"] = ""
-            self._refresh_tree_item(self.tree_widget.topLevelItem(i), "")
+            entry = self.file_entries[i]
+            entry["var_json"] = ""
+            if not entry.get("csv_file"):
+                entry["split_size"] = 0
+            self._refresh_tree_item(self.tree_widget.topLevelItem(i), entry)
+        self._update_split_button_state()
         self.save_ini()
+
+    def _assign_csv_override(self):
+        """Open a CSV file dialog and assign it to all selected queue entries."""
+        selected = self.tree_widget.selectedItems()
+        if not selected:
+            self.log("Select one or more scenes in the queue first.")
+            return
+        selected_rows = self._selected_row_indices()
+        default_dir = (os.path.dirname(self.file_entries[selected_rows[0]]["path"])
+                       if selected_rows else "")
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Select CSV Override", default_dir, "CSV Files (*.csv)")
+        if not path:
+            return
+        path = path.replace("\\", "/")
+        selected_rows = self._selected_row_indices()
+        for i in selected_rows:
+            self.file_entries[i]["csv_file"] = path
+            self._refresh_tree_item(self.tree_widget.topLevelItem(i), self.file_entries[i])
+        self._update_split_button_state()
+        self.save_ini()
+
+    def _clear_csv_override(self):
+        """Clear the CSV override for all selected queue entries."""
+        selected_rows = self._selected_row_indices()
+        if not selected_rows:
+            return
+        for i in selected_rows:
+            entry = self.file_entries[i]
+            entry["csv_file"] = ""
+            if not entry.get("var_json"):
+                entry["split_size"] = 0
+            self._refresh_tree_item(self.tree_widget.topLevelItem(i), entry)
+        self._update_split_button_state()
+        self.save_ini()
+
+    def _load_csv_override(self, csv_path, scene_label=""):
+        """Read a CSV file and return {"headers": [...], "rows": [[...], ...]} or None."""
+        if not csv_path:
+            return None
+        if not os.path.isfile(csv_path):
+            self.log(f"  Warning: CSV override not found for {scene_label}: {csv_path}")
+            return None
+        try:
+            import csv
+            with open(csv_path, newline="", encoding="utf-8") as f:
+                reader = list(csv.reader(f))
+            if not reader:
+                return None
+            return {"headers": reader[0], "rows": reader[1:]}
+        except Exception as e:
+            self.log(f"  Warning: Could not parse CSV for {scene_label}: {e}")
+            return None
+
+    def _get_override_row_count(self, entry):
+        """Return total data-row count from the entry's CSV or JSON override. 0 if unknown."""
+        csv_file = entry.get("csv_file", "")
+        if csv_file and os.path.isfile(csv_file):
+            try:
+                import csv
+                with open(csv_file, newline="", encoding="utf-8") as f:
+                    return max(0, sum(1 for _ in f) - 1)
+            except Exception:
+                return 0
+        var_json = entry.get("var_json", "")
+        if var_json and os.path.isfile(var_json):
+            try:
+                with open(var_json, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                return len(data.get("rows", []))
+            except Exception:
+                return 0
+        return 0
+
+    def _split_for_server(self):
+        """Configure row-based job splitting for selected queue entries."""
+        selected_rows = self._selected_row_indices()
+        if not selected_rows:
+            self.log("Select one or more scenes in the queue first.")
+            return
+        # Validate that at least one entry has override data
+        valid = [i for i in selected_rows
+                 if self.file_entries[i].get("var_json") or self.file_entries[i].get("csv_file")]
+        if not valid:
+            self.log("Split requires a Variation JSON or CSV override to be assigned first.")
+            return
+        # Get row count from first valid entry to show context
+        first_entry = self.file_entries[valid[0]]
+        total_rows = self._get_override_row_count(first_entry)
+        prompt = f"Rows per job (total rows: {total_rows}):" if total_rows else "Rows per job:"
+        split_size, ok = QtWidgets.QInputDialog.getInt(
+            self, "Split Variations for Server", prompt, 10, 1, 99999)
+        if not ok:
+            return
+        for i in valid:
+            self.file_entries[i]["split_size"] = split_size
+            self._refresh_tree_item(self.tree_widget.topLevelItem(i), self.file_entries[i])
+        if total_rows:
+            import math
+            num_jobs = math.ceil(total_rows / split_size)
+            self.log(f"Split configured: {total_rows} rows / {split_size} = {num_jobs} job(s)")
+        else:
+            self.log(f"Split configured: {split_size} rows per job (row count resolved at submit)")
+        self.save_ini()
+
+    def _clear_split(self):
+        """Clear job splitting for selected queue entries."""
+        selected_rows = self._selected_row_indices()
+        if not selected_rows:
+            return
+        for i in selected_rows:
+            self.file_entries[i]["split_size"] = 0
+            self._refresh_tree_item(self.tree_widget.topLevelItem(i), self.file_entries[i])
+        self.save_ini()
+
+    def _set_row_range(self):
+        """Prompt for a row range and assign it to selected queue entries."""
+        selected_rows = self._selected_row_indices()
+        if not selected_rows:
+            self.log("Select one or more scenes in the queue first.")
+            return
+        entry = self.file_entries[selected_rows[0]]
+        cur_start = entry.get("row_start", 0)
+        cur_end   = entry.get("row_end",   0)
+        start, ok = QtWidgets.QInputDialog.getInt(
+            self, "Row Range",
+            "Start row (header = row 1, first data row = 2, 0 = from beginning):",
+            cur_start, 0, 99999)
+        if not ok:
+            return
+        end, ok = QtWidgets.QInputDialog.getInt(
+            self, "Row Range",
+            "End row (inclusive, 0 = to end):",
+            cur_end, 0, 99999)
+        if not ok:
+            return
+        for i in selected_rows:
+            self.file_entries[i]["row_start"] = start
+            self.file_entries[i]["row_end"]   = end
+            self._refresh_tree_item(self.tree_widget.topLevelItem(i), self.file_entries[i])
+        r_s = start or 2
+        r_e = end or "end"
+        self.log(f"Row range set: {r_s}–{r_e} on {len(selected_rows)} entry(ies).")
+        self.save_ini()
+
+    def _clear_row_range(self):
+        """Clear the row range for selected queue entries."""
+        selected_rows = self._selected_row_indices()
+        if not selected_rows:
+            return
+        for i in selected_rows:
+            self.file_entries[i]["row_start"] = 0
+            self.file_entries[i]["row_end"]   = 0
+            self._refresh_tree_item(self.tree_widget.topLevelItem(i), self.file_entries[i])
+        self.save_ini()
+
+    def _update_split_button_state(self):
+        """Enable the split button only if a selected entry has var_json or csv_file."""
+        for i in self._selected_row_indices():
+            entry = self.file_entries[i]
+            if entry.get("var_json") or entry.get("csv_file"):
+                self.btn_split_jobs.setEnabled(True)
+                return
+        self.btn_split_jobs.setEnabled(False)
 
     def _selected_row_indices(self):
         """Return the top-level indices of currently selected tree items, in order."""
@@ -634,8 +861,12 @@ class BatchRenderDialog(QtWidgets.QDialog):
                              f"{prefs[0]},{1 if prefs[1] else 0}")
         rt.setINISetting(ini, "Meta", "Count", str(len(self.file_entries)))
         for i, entry in enumerate(self.file_entries):
-            rt.setINISetting(ini, "MaxFiles", f"File{i+1}", entry["path"])
-            rt.setINISetting(ini, "VarJson",  f"File{i+1}", entry.get("var_json", ""))
+            rt.setINISetting(ini, "MaxFiles",  f"File{i+1}", entry["path"])
+            rt.setINISetting(ini, "VarJson",   f"File{i+1}", entry.get("var_json", ""))
+            rt.setINISetting(ini, "CsvFile",   f"File{i+1}", entry.get("csv_file", ""))
+            rt.setINISetting(ini, "SplitSize", f"File{i+1}", str(entry.get("split_size", 0)))
+            rt.setINISetting(ini, "RowStart",  f"File{i+1}", str(entry.get("row_start", 0)))
+            rt.setINISetting(ini, "RowEnd",    f"File{i+1}", str(entry.get("row_end",   0)))
 
     def load_ini(self):
         self.file_entries = []
@@ -700,10 +931,15 @@ class BatchRenderDialog(QtWidgets.QDialog):
         for i in range(1, cnt + 1):
             f = rt.getINISetting(ini, "MaxFiles", f"File{i}")
             if f:
-                var_json = rt.getINISetting(ini, "VarJson", f"File{i}") or ""
-                entry = {"path": f, "var_json": var_json}
+                var_json   = rt.getINISetting(ini, "VarJson",   f"File{i}") or ""
+                csv_file   = rt.getINISetting(ini, "CsvFile",   f"File{i}") or ""
+                split_size = _int("SplitSize", f"File{i}", 0)
+                row_start  = _int("RowStart",  f"File{i}", 0)
+                row_end    = _int("RowEnd",    f"File{i}", 0)
+                entry = {"path": f, "var_json": var_json, "csv_file": csv_file,
+                         "split_size": split_size, "row_start": row_start, "row_end": row_end}
                 self.file_entries.append(entry)
-                self.tree_widget.addTopLevelItem(self._make_tree_item(f, var_json))
+                self.tree_widget.addTopLevelItem(self._make_tree_item(f, entry))
 
         server_url = rt.getINISetting(ini, "Network", "ServerUrl")
         if server_url:
@@ -725,6 +961,15 @@ class BatchRenderDialog(QtWidgets.QDialog):
         act_assign_json = menu.addAction("Assign Variation JSON...")
         act_clear_json  = menu.addAction("Clear Variation JSON")
         menu.addSeparator()
+        act_assign_csv  = menu.addAction("Assign CSV Override...")
+        act_clear_csv   = menu.addAction("Clear CSV Override")
+        menu.addSeparator()
+        act_set_range   = menu.addAction("Set Row Range...")
+        act_clear_range = menu.addAction("Clear Row Range")
+        menu.addSeparator()
+        act_split       = menu.addAction("Split Variations for Server...")
+        act_clear_split = menu.addAction("Clear Split")
+        menu.addSeparator()
         act_remove      = menu.addAction("Remove from Queue")
         action = menu.exec(QtGui.QCursor.pos())
 
@@ -743,6 +988,18 @@ class BatchRenderDialog(QtWidgets.QDialog):
             self._assign_var_json()
         elif action == act_clear_json:
             self._clear_var_json()
+        elif action == act_assign_csv:
+            self._assign_csv_override()
+        elif action == act_clear_csv:
+            self._clear_csv_override()
+        elif action == act_set_range:
+            self._set_row_range()
+        elif action == act_clear_range:
+            self._clear_row_range()
+        elif action == act_split:
+            self._split_for_server()
+        elif action == act_clear_split:
+            self._clear_split()
         elif action == act_remove:
             # Ensure the right-clicked item is in the selection, then remove all selected.
             if not item.isSelected():
@@ -821,16 +1078,25 @@ class BatchRenderDialog(QtWidgets.QDialog):
             return None
 
     def _collect_scene_jobs(self, entries, load_scene=True):
-        """Build a flat list of scene_jobs from file entries with per-entry variation overrides."""
+        """Build a flat list of scene_jobs from file entries with per-entry overrides."""
         all_jobs = []
         for entry in entries:
-            path     = entry["path"]
-            var_json = entry.get("var_json", "")
-            request  = self.build_job_request([path], load_scene=load_scene)
+            path      = entry["path"]
+            var_json  = entry.get("var_json", "")
+            csv_file  = entry.get("csv_file", "")
+            row_start = entry.get("row_start", 0)
+            row_end   = entry.get("row_end",   0)
+            request   = self.build_job_request([path], load_scene=load_scene)
             if var_json:
                 override = self._load_variation_override(var_json, os.path.basename(path))
                 if override is not None:
                     request["variation_override"] = override
+            if csv_file:
+                csv_data = self._load_csv_override(csv_file, os.path.basename(path))
+                if csv_data is not None:
+                    request["csv_override"] = csv_data
+            if row_start > 0 or row_end > 0:
+                request["render_range"] = {"start": row_start, "end": row_end}
             all_jobs.extend(schema.build_scene_jobs(request))
         return all_jobs
 
@@ -922,7 +1188,8 @@ class BatchRenderDialog(QtWidgets.QDialog):
         scene_path = (rt.maxFilePath + rt.maxFileName).replace("\\", "/")
         if not scene_path.strip("/") or not os.path.isfile(scene_path):
             return []
-        return [{"path": scene_path, "var_json": ""}]
+        return [{"path": scene_path, "var_json": "", "csv_file": "", "split_size": 0,
+                 "row_start": 0, "row_end": 0}]
 
     def discover_server(self):
         self.log("Discovering server on local network...")
@@ -954,31 +1221,73 @@ class BatchRenderDialog(QtWidgets.QDialog):
 
         total_jobs = 0
         for entry in entries:
-            request = self.build_job_request([entry["path"]], load_scene=True)
+            basename  = os.path.basename(entry["path"])
+            request   = self.build_job_request([entry["path"]], load_scene=True)
             request["request_id"] = ""
+
             var_json = entry.get("var_json", "")
             if var_json:
-                override = self._load_variation_override(var_json, os.path.basename(entry["path"]))
+                override = self._load_variation_override(var_json, basename)
                 if override is not None:
                     request["variation_override"] = override
+
+            csv_file = entry.get("csv_file", "")
+            if csv_file:
+                csv_data = self._load_csv_override(csv_file, basename)
+                if csv_data is not None:
+                    request["csv_override"] = csv_data
+
+            row_start = entry.get("row_start", 0)
+            row_end   = entry.get("row_end",   0)
+            if row_start > 0 or row_end > 0:
+                request["render_range"] = {"start": row_start, "end": row_end}
+
+            split_size = entry.get("split_size", 0)
+            if split_size > 0:
+                row_count = self._get_override_row_count(entry)
+                if row_count > 0:
+                    import math, copy
+                    num_chunks = math.ceil(row_count / split_size)
+                    for chunk_idx in range(num_chunks):
+                        # Convention: header = row 1, data starts at row 2.
+                        chunk_start = chunk_idx * split_size + 2
+                        chunk_end = min((chunk_idx + 1) * split_size + 1, row_count + 1)
+                        chunk_req = copy.deepcopy(request)
+                        chunk_req["render_range"] = {"start": chunk_start, "end": chunk_end}
+                        chunk_req["request_id"] = ""
+                        try:
+                            response = server_client.submit_job(server_url, chunk_req)
+                            job_ids = response.get("job_ids", []) or []
+                            total_jobs += len(job_ids)
+                        except Exception as e:
+                            self.log(f"  {basename} chunk {chunk_idx+1}: Submit failed: {e}")
+                    self.log(f"  {basename}: Split into {num_chunks} jobs ({split_size} rows each)")
+                    continue
+                else:
+                    self.log(f"  {basename}: Could not determine row count for split, submitting as single job.")
+
             self.last_job_json = schema.job_request_to_json(request)
             try:
                 response  = server_client.submit_job(server_url, request)
                 job_ids   = response.get("job_ids", []) or []
                 total_jobs += len(job_ids)
-                json_tag  = f" [+JSON]" if var_json else ""
+                tags = []
+                if var_json: tags.append("+JSON")
+                if csv_file: tags.append("+CSV")
+                tag_str = f" [{', '.join(tags)}]" if tags else ""
                 self.log(
-                    f"  {os.path.basename(entry['path'])}{json_tag}: "
+                    f"  {basename}{tag_str}: "
                     f"{len(job_ids)} job(s) queued"
                 )
             except Exception as e:
-                self.log(f"  {os.path.basename(entry['path'])}: Submit failed: {e}")
+                self.log(f"  {basename}: Submit failed: {e}")
 
         self.log(f"Submitted {total_jobs} total job(s) to server.")
 
     # Compatibility: keeps old internal call sites functional.
     def _render_files(self, file_list, load_files=True):
-        entries = [{"path": p, "var_json": ""} for p in file_list]
+        entries = [{"path": p, "var_json": "", "csv_file": "", "split_size": 0,
+                    "row_start": 0, "row_end": 0} for p in file_list]
         scene_jobs = self._collect_scene_jobs(entries, load_scene=load_files)
         self._run_scene_jobs(scene_jobs)
 

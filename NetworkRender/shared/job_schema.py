@@ -36,6 +36,8 @@ _DEFAULT_JOB_REQUEST = {
         "target_space": "",
     },
     "variation_override": None,  # Optional: full VariationManagerData dict
+    "csv_override": None,        # Optional: {"headers": [...], "rows": [[...], ...]}
+    "render_range": None,        # Optional: {"start": int, "end": int} (1-based inclusive)
 }
 
 
@@ -193,6 +195,20 @@ def normalize_job_request(job_request):
 
     vo = job_request.get("variation_override", None)
     out["variation_override"] = vo if isinstance(vo, dict) else None
+
+    csv_ovr = job_request.get("csv_override", None)
+    if isinstance(csv_ovr, dict):
+        h = csv_ovr.get("headers")
+        r = csv_ovr.get("rows")
+        if isinstance(h, list) and isinstance(r, list):
+            out["csv_override"] = {"headers": list(h), "rows": list(r)}
+
+    rr = job_request.get("render_range", None)
+    if isinstance(rr, dict):
+        rr_start = _int(rr.get("start", 0), 0)
+        rr_end = _int(rr.get("end", 0), 0)
+        if rr_start > 0 or rr_end > 0:
+            out["render_range"] = {"start": rr_start, "end": rr_end}
 
     if output["format"] not in ("jpg", "png", "tif", "exr"):
         output["format"] = "jpg"

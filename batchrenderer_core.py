@@ -142,7 +142,7 @@ def _resolve_name(
         pattern.replace("{Scene}", scene_name)
         .replace("{Camera}", camera_name)
         .replace("{Date}", date_str)
-        .replace("{Row}", str(row_index + 1))
+        .replace("{Row}", str(row_index + 2))
     )
     for key, value in row_data.items():
         result = result.replace(f"[{key}]", str(value))
@@ -449,6 +449,29 @@ class BatchRendererCore:
             if scene_job.get("variation_override"):
                 self.log("  Using job-supplied variation override.")
 
+            # Apply CSV override: replaces only headers + rows
+            csv_override = scene_job.get("csv_override")
+            if csv_override and variation_data:
+                csv_h = csv_override.get("headers")
+                csv_r = csv_override.get("rows")
+                if csv_h and csv_r is not None:
+                    variation_data = dict(variation_data)
+                    variation_data["headers"] = csv_h
+                    variation_data["rows"] = csv_r
+                    self.log(f"  CSV override: {len(csv_r)} rows, {len(csv_h)} columns")
+            elif csv_override and not variation_data:
+                csv_h = csv_override.get("headers", [])
+                csv_r = csv_override.get("rows", [])
+                if csv_h:
+                    variation_data = {
+                        "headers": csv_h, "rows": csv_r,
+                        "render_camera_mode": "active",
+                        "render_camera_column": "",
+                        "scheme": "{Scene}_{Row}_{Camera}",
+                        "operators": [],
+                    }
+                    self.log(f"  CSV override (no base config): {len(csv_r)} rows")
+
         rendered_any = False
         attempted = 0
         rendered = 0
@@ -462,11 +485,33 @@ class BatchRendererCore:
 
             self.log(f"  VariationMGR: {len(rows)} row(s), mode='{cam_mode}'")
 
+            # Build indexed rows and apply render range
+            indexed_rows = list(enumerate(rows))
+
+            range_start = variation_data.get("render_range_start", 0)
+            range_end = variation_data.get("render_range_end", 0)
+            job_range = scene_job.get("render_range")
+            if job_range:
+                jr_s = job_range.get("start", 0)
+                jr_e = job_range.get("end", 0)
+                if jr_s > 0 or jr_e > 0:
+                    range_start = jr_s
+                    range_end = jr_e
+
+            if range_start > 0 or range_end > 0:
+                # Convention: header = row 1, first data row = row 2.
+                sl_start = (range_start - 2) if range_start >= 2 else 0
+                sl_end = (range_end - 1) if range_end >= 2 else len(rows)
+                indexed_rows = indexed_rows[sl_start:sl_end]
+                self.log(
+                    f"  Render range: rows {range_start or 2}\u2013{range_end or (len(rows) + 1)} "
+                    f"({len(indexed_rows)} of {len(rows)})")
+
             operators = self._load_operators(variation_data)
             if variation_data.get("operators", []) and not operators:
                 self.log("  Warning: Scene has VariationMGR operators, but none were loaded.")
 
-            for row_idx, row_vals in enumerate(rows):
+            for row_idx, row_vals in indexed_rows:
                 row_data = dict(zip(headers, row_vals))
 
                 for op in operators:
