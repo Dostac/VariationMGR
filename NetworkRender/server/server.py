@@ -363,6 +363,7 @@ class JobServerState:
                     continue
                 job["status"] = "claimed"
                 job["claimed_by"] = worker_id
+                job["claimed_by_host"] = worker.get("host", "")
                 job["updated_at"] = now
                 job["attempts"] = int(job.get("attempts", 0)) + 1
                 worker["status"] = "claimed"

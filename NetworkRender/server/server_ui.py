@@ -388,6 +388,8 @@ class ServerWindow(QtWidgets.QMainWindow):
                 req_id = j.get("request_id", "")
                 claimed_by = str(j.get("claimed_by", "") or "")
                 host = workers_by_id.get(claimed_by, {}).get("host", "") if claimed_by else ""
+                if not host:
+                    host = j.get("claimed_by_host", "")
                 scene_name = os.path.basename(scene) if scene else ""
                 id_tooltip = f"Job ID: {job_id}\nRequest ID: {req_id}"
                 self._set_item(self.tbl_jobs, row, 0, _short_id(job_id), tooltip=id_tooltip, user_data=job_id)
