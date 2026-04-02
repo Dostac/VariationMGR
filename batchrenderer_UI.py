@@ -101,7 +101,6 @@ class BatchRenderDialog(QtWidgets.QDialog):
         file_bar = QtWidgets.QHBoxLayout()
         file_bar.setSpacing(8)
         self.btn_add         = _ctrl(QtWidgets.QPushButton("＋ Add Files"))
-        self.btn_assign_json = _ctrl(QtWidgets.QPushButton("📄 Assign JSON"))
         self.btn_assign_csv  = _ctrl(QtWidgets.QPushButton("📊 Assign CSV"))
         self.btn_split_jobs  = _ctrl(QtWidgets.QPushButton("✂ Split for Server"))
         self.btn_split_jobs.setToolTip(
@@ -111,7 +110,6 @@ class BatchRenderDialog(QtWidgets.QDialog):
         self.btn_remove     = _ctrl(QtWidgets.QPushButton("− Remove"))
         self.btn_clear      = _ctrl(QtWidgets.QPushButton("✕ Clear"))
         file_bar.addWidget(self.btn_add)
-        file_bar.addWidget(self.btn_assign_json)
         file_bar.addWidget(self.btn_assign_csv)
         file_bar.addWidget(self.btn_split_jobs)
         file_bar.addWidget(self.btn_remove)
@@ -324,7 +322,6 @@ class BatchRenderDialog(QtWidgets.QDialog):
         # CONNECTIONS
         # ------------------------------------------------------------------
         self.btn_add.clicked.connect(self.add_files)
-        self.btn_assign_json.clicked.connect(self._assign_var_json)
         self.btn_assign_csv.clicked.connect(self._assign_csv_override)
         self.btn_split_jobs.clicked.connect(self._split_for_server)
         self.btn_set_range.clicked.connect(self._set_row_range)
@@ -1150,6 +1147,68 @@ class BatchRenderDialog(QtWidgets.QDialog):
         if not aborted:
             self.log("=== Complete ===")
 
+    def _confirm_render(self, action_label, file_count):
+        """Show a compact confirmation dialog before starting a render. Returns True if confirmed."""
+        fmt        = self.cmb_ext.currentText()
+        depth      = self.cmb_depth.currentText()
+        alpha      = "ENABLED" if self.chk_alpha.isChecked() else "DISABLED"
+        resolution = self.spn_res.value()
+        variation  = "Enabled" if self.chk_use_variations.isChecked() else "Disabled"
+        folder     = self.le_path.text().strip() or "(not set)"
+
+        if action_label == "current":
+            header = "This will render the current scene file."
+        elif action_label == "submit":
+            header = f"This will submit {file_count} job(s) to the server."
+        else:
+            header = f"This will render {file_count} file(s) in batch mode."
+
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("Confirm Render")
+        dlg.setMinimumWidth(420)
+        layout = QtWidgets.QVBoxLayout(dlg)
+        layout.setSpacing(12)
+        layout.setContentsMargins(20, 16, 20, 16)
+
+        layout.addWidget(QtWidgets.QLabel(header))
+
+        sep = QtWidgets.QFrame()
+        sep.setFrameShape(QtWidgets.QFrame.HLine)
+        layout.addWidget(sep)
+
+        form = QtWidgets.QFormLayout()
+        form.setSpacing(6)
+        form.addRow("Variation:",  QtWidgets.QLabel(variation))
+        form.addRow("Resolution:", QtWidgets.QLabel(f"{resolution} px"))
+        form.addRow("Format:",     QtWidgets.QLabel(f"{fmt}  ({depth}, alpha {alpha})"))
+        layout.addLayout(form)
+
+        sep2 = QtWidgets.QFrame()
+        sep2.setFrameShape(QtWidgets.QFrame.HLine)
+        layout.addWidget(sep2)
+
+        lbl_folder_title = QtWidgets.QLabel("OUTPUT FOLDER:")
+        font = lbl_folder_title.font()
+        font.setPointSize(font.pointSize() + 3)
+        font.setBold(True)
+        lbl_folder_title.setFont(font)
+        layout.addWidget(lbl_folder_title)
+
+        lbl_folder = QtWidgets.QLabel(folder)
+        lbl_folder.setWordWrap(True)
+        font2 = lbl_folder.font()
+        font2.setPointSize(font2.pointSize() + 2)
+        lbl_folder.setFont(font2)
+        layout.addWidget(lbl_folder)
+
+        btns = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        layout.addWidget(btns)
+
+        return dlg.exec() == QtWidgets.QDialog.Accepted
+
     def render_current_scene(self):
         if not rt.maxFileName:
             self.log("Error: Current scene is unsaved. Save the .max file first.")
@@ -1157,6 +1216,8 @@ class BatchRenderDialog(QtWidgets.QDialog):
         scene_path = (rt.maxFilePath + rt.maxFileName).replace("\\", "/")
         if not scene_path.strip("/") or not os.path.isfile(scene_path):
             self.log("Error: No scene is currently open.")
+            return
+        if not self._confirm_render("current", 1):
             return
         self.log("=== Render Current Scene ===")
         request = self.build_job_request([scene_path], load_scene=False)
@@ -1170,6 +1231,8 @@ class BatchRenderDialog(QtWidgets.QDialog):
     def run_batch(self):
         if not self.file_entries:
             self.log("No files queued.")
+            return
+        if not self._confirm_render("batch", len(self.file_entries)):
             return
         self.log(f"=== Batch Start: {len(self.file_entries)} file(s) ===")
         self.save_ini()
@@ -1217,6 +1280,9 @@ class BatchRenderDialog(QtWidgets.QDialog):
             self.log(f"Server online: {health.get('status', 'ok')}")
         except Exception as e:
             self.log(f"Server unreachable: {e}")
+            return
+
+        if not self._confirm_render("submit", len(entries)):
             return
 
         total_jobs = 0

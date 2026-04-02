@@ -13,7 +13,15 @@
       "Bash(ls -la *.py)",
       "Bash(grep -r batchrenderer_core vb_nasnasDatabase3ds_MaxPlugins_ScriptsVirtualBuildersVariationMGR --include=*.py)",
       "Bash(grep -r variation_core vb_nasnasDatabase3ds_MaxPlugins_ScriptsVirtualBuildersVariationMGR --include=*.py)",
-      "Bash(git config:*)"
+      "Bash(git config:*)",
+      "Read(///vb_nas/nas/Database/3ds_Max/Plugins_Scripts/VirtualBuilders/**)",
+      "Bash(tree -L 3 //vb_nas/nas/Database/3ds_Max/Plugins_Scripts/VirtualBuilders/VariationMGR -I \"__pycache__|*.pyc|dist|build\")",
+      "Read(///vb_nas/nas/Database/3ds_Max/Plugins_Scripts/VirtualBuilders/VariationMGR/packaging/**)",
+      "Read(///vb_nas/nas/Database/3ds_Max/Plugins_Scripts/VirtualBuilders/VariationMGR/packaging/dist/**)",
+      "Read(///vb_nas/nas/Database/3ds_Max/Plugins_Scripts/VirtualBuilders/VariationMGR/NetworkRender/**)",
+      "Read(///vb_nas/nas/Database/3ds_Max/Plugins_Scripts/VirtualBuilders/VariationMGR/packaging/build/**)",
+      "Bash(powershell.exe -NoProfile -Command \"Get-ChildItem ''HKLM:\\\\SOFTWARE\\\\Autodesk'' -EA 0 | Select-Object -ExpandProperty PSChildName\")",
+      "Bash(powershell.exe -NoProfile -Command \"Get-ItemProperty ''HKLM:\\\\SOFTWARE\\\\Autodesk\\\\3dsMax\\\\28.0'' -EA 0 | Format-List\")"
     ]
   }
 }

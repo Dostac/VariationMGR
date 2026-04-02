@@ -10,6 +10,52 @@ from PySide6.QtWidgets import (QWidget, QLabel, QLineEdit, QPushButton,
                                QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
                                QHeaderView, QMenu, QTabWidget, QGroupBox,
                                QComboBox, QSplitter, QToolButton, QMessageBox)
+
+
+class _HoldMenuFilter(QtCore.QObject):
+    """
+    Event filter that gives a plain QToolButton press-and-hold menu behavior.
+    Short click (< 75 ms) emits clicked. Press-and-hold >= 75 ms opens the menu.
+
+    Using a QObject filter instead of a QToolButton subclass avoids C++ virtual
+    dispatch issues during widget destruction inside 3ds Max's embedded Qt.
+    """
+    _HOLD_MS = 75
+
+    def __init__(self, button, parent=None):
+        super().__init__(parent)
+        self._button = button
+        self._held = False
+        self._timer = QtCore.QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(self._HOLD_MS)
+        self._timer.timeout.connect(self._on_hold)
+        button.destroyed.connect(self._timer.stop)
+
+    def eventFilter(self, obj, event):
+        if obj is not self._button:
+            return False
+        t = event.type()
+        if t == QtCore.QEvent.MouseButtonPress and event.button() == QtCore.Qt.LeftButton:
+            self._held = False
+            self._timer.start()
+            self._button.setDown(True)
+            return True  # consume — prevents Qt's own DelayedPopup timer
+        if t == QtCore.QEvent.MouseButtonRelease and event.button() == QtCore.Qt.LeftButton:
+            self._timer.stop()
+            self._button.setDown(False)
+            if not self._held:
+                self._button.clicked.emit()
+            self._held = False
+            return True
+        return False
+
+    def _on_hold(self):
+        self._held = True
+        self._button.setDown(False)
+        if self._button.menu():
+            self._button.menu().exec(
+                self._button.mapToGlobal(self._button.rect().bottomLeft()))
 import qtmax
 from pymxs import runtime as rt
 
@@ -213,22 +259,26 @@ class VariationManager(QtWidgets.QDialog):
         self.btn_edit_csv.setText("✎ Edit CSV")
         self.btn_edit_csv.setMinimumHeight(40)
         self.btn_edit_csv.setMinimumWidth(120)
+        self.btn_edit_csv.setPopupMode(QToolButton.DelayedPopup)
         csv_menu = QMenu(self)
         csv_menu.addAction("Import CSV", self.import_csv)
         csv_menu.addAction("Export CSV", self.export_csv)
         self.btn_edit_csv.setMenu(csv_menu)
-        self.btn_edit_csv.setPopupMode(QToolButton.DelayedPopup)
+        self._csv_hold_filter = _HoldMenuFilter(self.btn_edit_csv, self)
+        self.btn_edit_csv.installEventFilter(self._csv_hold_filter)
         self.btn_folder = QPushButton("📂 Ops Folder")
         self.btn_reset = QPushButton("🗑 Reset")
         self.btn_save_max = QToolButton()
         self.btn_save_max.setText("💾 Save to Scene")
         self.btn_save_max.setMinimumHeight(40)
         self.btn_save_max.setMinimumWidth(140)
+        self.btn_save_max.setPopupMode(QToolButton.DelayedPopup)
         scene_menu = QMenu(self)
         scene_menu.addAction("Import Variation Config...", self.import_json_config)
         scene_menu.addAction("Export Variation Config...", self.export_json_config)
         self.btn_save_max.setMenu(scene_menu)
-        self.btn_save_max.setPopupMode(QToolButton.DelayedPopup)
+        self._save_hold_filter = _HoldMenuFilter(self.btn_save_max, self)
+        self.btn_save_max.installEventFilter(self._save_hold_filter)
 
         _mat_button(self.btn_add_row, 90)
         _mat_button(self.btn_add_col, 100)
@@ -257,6 +307,7 @@ class VariationManager(QtWidgets.QDialog):
         # Keep row numbers in sync with the header=row1 / data=row2 convention.
         self.table.model().rowsInserted.connect(self._update_row_headers)
         self.table.model().rowsRemoved.connect(self._update_row_headers)
+        self.table.installEventFilter(self)
 
         data_layout.addLayout(toolbar)
         data_layout.addWidget(self.table)
@@ -714,6 +765,32 @@ class VariationManager(QtWidgets.QDialog):
             self.cb_prop_tokens.addItems(self.custom_properties)
         else:
             self.cb_prop_tokens.addItem("-- No Properties --")
+
+    def eventFilter(self, obj, event):
+        if obj is self.table and event.type() == QtCore.QEvent.KeyPress:
+            if event.matches(QtGui.QKeySequence.Copy):
+                self._table_copy()
+                return True
+            if event.matches(QtGui.QKeySequence.Paste):
+                self._table_paste()
+                return True
+        return super().eventFilter(obj, event)
+
+    def _table_copy(self):
+        item = self.table.currentItem()
+        if item:
+            QtWidgets.QApplication.clipboard().setText(item.text())
+
+    def _table_paste(self):
+        text = QtWidgets.QApplication.clipboard().text().strip()
+        if not text:
+            return
+        self.table.blockSignals(True)
+        for sel_item in self.table.selectedItems():
+            sel_item.setText(text)
+        self.table.blockSignals(False)
+        if self.table.currentItem():
+            self._on_cell_changed(self.table.currentItem())
 
     def _on_cell_changed(self, item):
         """Sanitize cell text on edit, then refresh the naming preview."""
