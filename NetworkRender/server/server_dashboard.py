@@ -69,16 +69,20 @@ def render_dashboard(state, server_address):
     if not worker_rows:
         worker_rows.append('<tr><td colspan="5" class="empty">No workers connected.</td></tr>')
 
+    workers_by_id = {str(w.get("worker_id", "")): w for w in workers}
+
     job_rows = []
     for job in recent_jobs:
         scene_job = job.get("scene_job") or {}
+        claimed_by = str(job.get("claimed_by") or "")
+        worker_host = workers_by_id.get(claimed_by, {}).get("host", "") or job.get("claimed_by_host", "")
         job_rows.append(
             "<tr>"
             f"<td title=\"{esc(job.get('job_id'))}\">{esc(_short_id(job.get('job_id')))}</td>"
             f"<td title=\"{esc(scene_job.get('scene_file'))}\">{esc(os.path.basename(scene_job.get('scene_file') or '')) or '-'}</td>"
             f"<td title=\"{esc(scene_job.get('output_file'))}\">{esc(os.path.basename(scene_job.get('output_file') or '')) or '-'}</td>"
             f"<td>{status_chip(job.get('status'))}</td>"
-            f"<td>{esc(job.get('claimed_by')) or '-'}</td>"
+            f"<td title=\"{esc(claimed_by)}\">{esc(worker_host) or '-'}</td>"
             f"<td>{esc(job.get('attempts', 0))}</td>"
             f"<td>{esc(_fmt_ts(job.get('updated_at')))}</td>"
             f"<td title=\"{esc(job.get('last_error'))}\">{esc(job.get('last_error')) or '-'}</td>"
