@@ -88,6 +88,11 @@ class VariationManager(QtWidgets.QDialog):
         self.render_range_end = 0     # 0 = to end
         self._csv_watcher = None
         self._csv_temp_path = None
+
+        self._loading = True
+        self._last_saved_str = ""
+        self._autosave_timer = None
+        self._scene_watcher_id = None
         
         # --- PREFERENCE SETUP VIA CORE ---
         # INI lives in userScripts so each team member has their own local settings.
@@ -114,6 +119,15 @@ class VariationManager(QtWidgets.QDialog):
 
         # 3. Load Scene Data (Table & Tab Instances)
         self.load_from_max_file()
+
+        # 4. Begin autosave + scene-change tracking now that initial state is loaded.
+        self._loading = False
+        try:
+            self._last_saved_str = json.dumps(self._build_current_data(), sort_keys=True)
+        except Exception:
+            self._last_saved_str = ""
+        self._install_autosave()
+        self._install_scene_watcher()
 
     def init_ui(self):
         root = QVBoxLayout(self)
@@ -439,20 +453,26 @@ class VariationManager(QtWidgets.QDialog):
                 print(f"Error restoring {op_class_name}: {e}")
 
         self.columns_changed.connect(op_instance.on_columns_changed)
-        widget = op_instance.get_ui()
+        inner = op_instance.get_ui()
+
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidget(inner)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
         self.active_ops_instances.append({
             "name": op_class_name,
             "instance": op_instance,
-            "widget": widget,
+            "widget": scroll,
             "instance_id": instance_id,
         })
-        
-        self.tabs.addTab(widget, op_class_name)
+
+        self.tabs.addTab(scroll, op_class_name)
 
         if hasattr(op_instance, 'status_changed'):
             op_instance.status_changed.connect(
-                lambda msg, err, w=widget: self._on_operator_status(w, msg, err)
+                lambda msg, err, w=scroll: self._on_operator_status(w, msg, err)
             )
 
         if hasattr(op_instance, 'on_columns_changed'):
@@ -679,28 +699,93 @@ class VariationManager(QtWidgets.QDialog):
         self.update_naming_preview()
         return loaded_data
 
-    def closeEvent(self, event):
-        saved = self._read_saved_data()
-        current = self._build_current_data()
+    # ------------------------------------------------------------------
+    # Autosave + scene-change tracking
+    # ------------------------------------------------------------------
 
-        saved_str   = json.dumps(saved,   sort_keys=True) if saved is not None else None
-        current_str = json.dumps(current, sort_keys=True)
+    def _install_autosave(self):
+        """Start a heartbeat timer that serializes current state every 2s and writes
+        VariationManagerData to the .max custom properties whenever it differs from
+        the last write. Diff-based so an idle session does no I/O."""
+        self._autosave_timer = QtCore.QTimer(self)
+        self._autosave_timer.setInterval(2000)
+        self._autosave_timer.timeout.connect(self._autosave_tick)
+        self._autosave_timer.start()
 
-        if saved_str != current_str:
-            reply = QMessageBox.question(
-                self,
-                "Unsaved Changes",
-                "You have unsaved variation data.\nSave to scene before closing?",
-                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
-                QMessageBox.Yes,
+    def _autosave_tick(self):
+        if self._loading:
+            return
+        try:
+            current = self._build_current_data()
+            current_str = json.dumps(current, sort_keys=True)
+        except Exception as e:
+            print(f"VM autosave: failed to build state: {e}")
+            return
+        if current_str == self._last_saved_str:
+            return
+        try:
+            rt.fileProperties.addProperty(
+                rt.name('custom'), "VariationManagerData", json.dumps(current)
             )
-            if reply == QMessageBox.Yes:
-                rt.fileProperties.addProperty(
-                    rt.name('custom'), "VariationManagerData", json.dumps(current)
-                )
-            elif reply == QMessageBox.Cancel:
-                event.ignore()
-                return
+            self._last_saved_str = current_str
+        except Exception as e:
+            print(f"VM autosave: write failed: {e}")
+
+    def _install_scene_watcher(self):
+        """Register Max callbacks so we reload the dialog when the scene changes."""
+        self._scene_watcher_id = rt.Name('VariationMgrSceneWatcher')
+        try:
+            rt.callbacks.removeScripts(id=self._scene_watcher_id)
+        except Exception:
+            pass
+        # MaxScript-side body: forwards to a module-level Python helper that
+        # resolves the live dialog via the QApplication singleton attribute.
+        script = ('python.Execute "import VariationMGR; '
+                  'VariationMGR._scene_changed_callback()"')
+        for evt in ('filePostOpen', 'systemPostNew', 'systemPostReset'):
+            try:
+                rt.callbacks.addScript(rt.Name(evt), script, id=self._scene_watcher_id)
+            except Exception as e:
+                print(f"VM: could not register scene callback '{evt}': {e}")
+
+    def _uninstall_scene_watcher(self):
+        if self._scene_watcher_id is not None:
+            try:
+                rt.callbacks.removeScripts(id=self._scene_watcher_id)
+            except Exception:
+                pass
+            self._scene_watcher_id = None
+
+    def _on_scene_changed(self):
+        # Defer to the next event-loop tick so Max finishes its post-open work
+        # before we mutate Qt widgets.
+        QtCore.QTimer.singleShot(0, self._reload_after_scene_change)
+
+    def _reload_after_scene_change(self):
+        self._loading = True
+        try:
+            self.load_from_max_file()
+        finally:
+            self._loading = False
+            try:
+                self._last_saved_str = json.dumps(self._build_current_data(), sort_keys=True)
+            except Exception:
+                self._last_saved_str = ""
+
+    def closeEvent(self, event):
+        # Autosave keeps the scene record in sync; flush once more before tearing down.
+        self._uninstall_scene_watcher()
+        if self._autosave_timer is not None:
+            self._autosave_timer.stop()
+            try:
+                self._autosave_tick()
+            except Exception as e:
+                print(f"VM: final autosave failed: {e}")
+            self._autosave_timer = None
+
+        app = QtWidgets.QApplication.instance()
+        if app is not None and getattr(app, '_vb_variation_manager', None) is self:
+            app._vb_variation_manager = None
 
         self._cleanup_csv_watcher()
         super().closeEvent(event)
@@ -716,14 +801,23 @@ class VariationManager(QtWidgets.QDialog):
         if reply != QMessageBox.Yes:
             return
         self._cleanup_csv_watcher()
-        rt.fileProperties.deleteProperty(rt.name('custom'), "VariationManagerData")
-        self.table.setRowCount(0)
-        self.table.setColumnCount(0)
-        self.custom_properties = []
-        while self.tabs.count() > 0:
-            self.remove_operator_tab(0)
-        self.update_prop_dropdown()
-        self.columns_changed.emit(self.custom_properties)
+        # Suppress autosave while we tear everything down, then sync the baseline.
+        self._loading = True
+        try:
+            rt.fileProperties.deleteProperty(rt.name('custom'), "VariationManagerData")
+            self.table.setRowCount(0)
+            self.table.setColumnCount(0)
+            self.custom_properties = []
+            while self.tabs.count() > 0:
+                self.remove_operator_tab(0)
+            self.update_prop_dropdown()
+            self.columns_changed.emit(self.custom_properties)
+        finally:
+            self._loading = False
+            try:
+                self._last_saved_str = json.dumps(self._build_current_data(), sort_keys=True)
+            except Exception:
+                self._last_saved_str = ""
         print("VM: Scene data cleared.")
 
     # --- HELPERS ---
@@ -1202,6 +1296,28 @@ class VariationManager(QtWidgets.QDialog):
         else:
             br = importlib.import_module("batchrenderer")
         br.main()
+
+
+def _scene_changed_callback():
+    """Invoked from 3ds Max scene callbacks (filePostOpen / systemPostNew /
+    systemPostReset). Forwards to the live VariationManager via the app singleton."""
+    try:
+        app = QtWidgets.QApplication.instance()
+        if app is None:
+            return
+        vm = getattr(app, '_vb_variation_manager', None)
+        if vm is None:
+            return
+        try:
+            import shiboken6
+            if not shiboken6.isValid(vm):
+                app._vb_variation_manager = None
+                return
+        except Exception:
+            pass
+        vm._on_scene_changed()
+    except Exception as e:
+        print(f"VariationMgr scene callback error: {e}")
 
 
 def main():

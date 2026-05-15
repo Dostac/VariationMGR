@@ -75,20 +75,7 @@ class FloorGeneratorOperator(QtCore.QObject):
         self._setup_ui()
 
     def _setup_ui(self):
-        root = QtWidgets.QVBoxLayout(self.main_widget)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
-
-        scroll = QtWidgets.QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        root.addWidget(scroll)
-
-        container = QtWidgets.QWidget()
-        scroll.setWidget(container)
-
-        content_root = QtWidgets.QVBoxLayout(container)
+        content_root = QtWidgets.QVBoxLayout(self.main_widget)
         content_root.setContentsMargins(12, 12, 12, 12)
         content_root.setSpacing(0)
 
