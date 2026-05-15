@@ -12,50 +12,6 @@ from PySide6.QtWidgets import (QWidget, QLabel, QLineEdit, QPushButton,
                                QComboBox, QSplitter, QToolButton, QMessageBox)
 
 
-class _HoldMenuFilter(QtCore.QObject):
-    """
-    Event filter that gives a plain QToolButton press-and-hold menu behavior.
-    Short click (< 75 ms) emits clicked. Press-and-hold >= 75 ms opens the menu.
-
-    Using a QObject filter instead of a QToolButton subclass avoids C++ virtual
-    dispatch issues during widget destruction inside 3ds Max's embedded Qt.
-    """
-    _HOLD_MS = 75
-
-    def __init__(self, button, parent=None):
-        super().__init__(parent)
-        self._button = button
-        self._held = False
-        self._timer = QtCore.QTimer(self)
-        self._timer.setSingleShot(True)
-        self._timer.setInterval(self._HOLD_MS)
-        self._timer.timeout.connect(self._on_hold)
-        button.destroyed.connect(self._timer.stop)
-
-    def eventFilter(self, obj, event):
-        if obj is not self._button:
-            return False
-        t = event.type()
-        if t == QtCore.QEvent.MouseButtonPress and event.button() == QtCore.Qt.LeftButton:
-            self._held = False
-            self._timer.start()
-            self._button.setDown(True)
-            return True  # consume — prevents Qt's own DelayedPopup timer
-        if t == QtCore.QEvent.MouseButtonRelease and event.button() == QtCore.Qt.LeftButton:
-            self._timer.stop()
-            self._button.setDown(False)
-            if not self._held:
-                self._button.clicked.emit()
-            self._held = False
-            return True
-        return False
-
-    def _on_hold(self):
-        self._held = True
-        self._button.setDown(False)
-        if self._button.menu():
-            self._button.menu().exec(
-                self._button.mapToGlobal(self._button.rect().bottomLeft()))
 import qtmax
 from pymxs import runtime as rt
 
@@ -65,8 +21,22 @@ if _script_dir not in sys.path:
 
 import variation_core as vcore
 
+
+class _NoWheelFilter(QtCore.QObject):
+    """Swallows wheel events so a widget doesn't scrub its value when the user
+    is trying to scroll the surrounding panel. Installed on QComboBoxes."""
+    def eventFilter(self, obj, event):
+        if event.type() == QtCore.QEvent.Wheel:
+            event.ignore()
+            return True
+        return False
+
+
 class VariationManager(QtWidgets.QDialog):
     columns_changed = QtCore.Signal(list)
+
+    # Flip to False to restore Qt's default wheel-changes-value behavior on combo boxes.
+    DISABLE_COMBO_WHEEL = True
 
     def __init__(self, parent=None):
         max_hwnd = rt.windows.getMAXHWND()
@@ -93,7 +63,9 @@ class VariationManager(QtWidgets.QDialog):
         self._last_saved_str = ""
         self._autosave_timer = None
         self._scene_watcher_id = None
-        
+
+        self._no_wheel_filter = _NoWheelFilter(self)
+
         # --- PREFERENCE SETUP VIA CORE ---
         # INI lives in userScripts so each team member has their own local settings.
         script_dir = os.path.dirname(os.path.realpath(__file__))
@@ -105,6 +77,8 @@ class VariationManager(QtWidgets.QDialog):
             except: pass
 
         self.init_ui()
+
+        self._disable_combo_wheel(self)
 
         self._csv_debounce = QtCore.QTimer(self)
         self._csv_debounce.setSingleShot(True)
@@ -267,46 +241,34 @@ class VariationManager(QtWidgets.QDialog):
         toolbar = QHBoxLayout()
         toolbar.setSpacing(8)
 
-        self.btn_add_row = QPushButton("＋ Row")
-        self.btn_add_col = QPushButton("＋ Column")
-        self.btn_edit_csv = QToolButton()
-        self.btn_edit_csv.setText("✎ Edit CSV")
-        self.btn_edit_csv.setMinimumHeight(40)
-        self.btn_edit_csv.setMinimumWidth(120)
-        self.btn_edit_csv.setPopupMode(QToolButton.DelayedPopup)
-        csv_menu = QMenu(self)
-        csv_menu.addAction("Import CSV", self.import_csv)
-        csv_menu.addAction("Export CSV", self.export_csv)
-        self.btn_edit_csv.setMenu(csv_menu)
-        self._csv_hold_filter = _HoldMenuFilter(self.btn_edit_csv, self)
-        self.btn_edit_csv.installEventFilter(self._csv_hold_filter)
-        self.btn_folder = QPushButton("📂 Ops Folder")
-        self.btn_reset = QPushButton("🗑 Reset")
-        self.btn_save_max = QToolButton()
-        self.btn_save_max.setText("💾 Save to Scene")
-        self.btn_save_max.setMinimumHeight(40)
-        self.btn_save_max.setMinimumWidth(140)
-        self.btn_save_max.setPopupMode(QToolButton.DelayedPopup)
-        scene_menu = QMenu(self)
-        scene_menu.addAction("Import Variation Config...", self.import_json_config)
-        scene_menu.addAction("Export Variation Config...", self.export_json_config)
-        self.btn_save_max.setMenu(scene_menu)
-        self._save_hold_filter = _HoldMenuFilter(self.btn_save_max, self)
-        self.btn_save_max.installEventFilter(self._save_hold_filter)
+        self.btn_add_row    = QPushButton("＋ Row")
+        self.btn_add_col    = QPushButton("＋ Column")
+        self.btn_edit_csv   = QPushButton("✎ Edit CSV")
+        self.btn_save_csv   = QPushButton("💾 Save CSV")
+        self.btn_import_csv = QPushButton("📥 Import CSV")
+        self.btn_more = QToolButton()
+        self.btn_more.setText("⚙")
+        self.btn_more.setToolTip("More actions: Save cfg, Load cfg, Ops Folder, Reset")
 
-        _mat_button(self.btn_add_row, 90)
-        _mat_button(self.btn_add_col, 100)
-        _mat_button(self.btn_folder, 120)
-        _mat_button(self.btn_reset, 100)
+        _mat_button(self.btn_add_row,    90)
+        _mat_button(self.btn_add_col,    100)
+        _mat_button(self.btn_edit_csv,   120)
+        _mat_button(self.btn_save_csv,   120)
+        _mat_button(self.btn_import_csv, 120)
+        # Settings button: QToolButton so it sizes to its glyph instead of
+        # inheriting QPushButton's enforced minimum width.
+        self.btn_more.setMinimumHeight(40)
+        self.btn_more.setSizePolicy(
+            QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
+        self.btn_more.clicked.connect(self._show_more_menu)
 
         toolbar.addWidget(self.btn_add_row)
         toolbar.addWidget(self.btn_add_col)
         toolbar.addStretch()
         toolbar.addWidget(self.btn_edit_csv)
-        toolbar.addWidget(self.create_separator())
-        toolbar.addWidget(self.btn_folder)
-        toolbar.addWidget(self.btn_reset)
-        toolbar.addWidget(self.btn_save_max)
+        toolbar.addWidget(self.btn_save_csv)
+        toolbar.addWidget(self.btn_import_csv)
+        toolbar.addWidget(self.btn_more)
 
         self.table = QTableWidget(0, 0)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
@@ -377,9 +339,8 @@ class VariationManager(QtWidgets.QDialog):
         self.btn_add_row.clicked.connect(self.add_row)
         self.btn_add_col.clicked.connect(self.add_column)
         self.btn_edit_csv.clicked.connect(self.edit_csv)
-        self.btn_save_max.clicked.connect(self.save_to_max_file)
-        self.btn_reset.clicked.connect(self.reset_data)
-        self.btn_folder.clicked.connect(self.change_op_folder)
+        self.btn_save_csv.clicked.connect(self.export_csv)
+        self.btn_import_csv.clicked.connect(self.import_csv)
         self.btn_run_row.clicked.connect(self.execute_selected_row)
         self.btn_batch_render.clicked.connect(self.open_batch_renderer)
 
@@ -395,12 +356,33 @@ class VariationManager(QtWidgets.QDialog):
         self.spn_range_end.editingFinished.connect(self._clamp_range_end)
         self.columns_changed.connect(self._on_cam_columns_changed)
 
-    def create_separator(self):
-        line = QtWidgets.QFrame()
-        line.setFrameShape(QtWidgets.QFrame.VLine)
-        line.setFrameShadow(QtWidgets.QFrame.Sunken)
-        line.setContentsMargins(8, 0, 8, 0)
-        return line
+    def _disable_combo_wheel(self, root):
+        """Install the no-wheel filter on every QComboBox under `root`. Idempotent:
+        each combo is marked so re-running on freshly-added widgets is safe."""
+        if not self.DISABLE_COMBO_WHEEL:
+            return
+        if root is None:
+            return
+        marker = "_vm_no_wheel_installed"
+        for combo in root.findChildren(QComboBox):
+            if combo.property(marker):
+                continue
+            combo.installEventFilter(self._no_wheel_filter)
+            combo.setProperty(marker, True)
+
+    def _show_more_menu(self):
+        """Drop-down on the ⚙ toolbar button: secondary actions that aren't
+        commonly used and don't need top-level button real estate."""
+        menu = QMenu(self)
+        menu.addAction("💾 Save cfg…",  self.export_json_config)
+        menu.addAction("📂 Load cfg…",  self.import_json_config)
+        menu.addSeparator()
+        menu.addAction("📁 Ops Folder…", self.change_op_folder)
+        menu.addSeparator()
+        menu.addAction("🗑 Reset",       self.reset_data)
+        menu.exec(self.btn_more.mapToGlobal(self.btn_more.rect().bottomRight())
+                  - QtCore.QPoint(menu.sizeHint().width(), 0))
+
     # --- OPERATOR LOGIC ---
 
     def change_op_folder(self):
@@ -460,6 +442,8 @@ class VariationManager(QtWidgets.QDialog):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        self._disable_combo_wheel(inner)
 
         self.active_ops_instances.append({
             "name": op_class_name,
@@ -616,11 +600,6 @@ class VariationManager(QtWidgets.QDialog):
                 except Exception:
                     return None
         return None
-
-    def save_to_max_file(self):
-        data = self._build_current_data()
-        rt.fileProperties.addProperty(rt.name('custom'), "VariationManagerData", json.dumps(data))
-        QMessageBox.information(self, "Variation Manager", "Data saved successfully.")
 
     def load_from_max_file(self):
         self.table.setRowCount(0)
