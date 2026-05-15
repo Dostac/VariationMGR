@@ -303,6 +303,14 @@ class BatchRenderDialog(QtWidgets.QDialog):
         self.btn_render.setMinimumHeight(48)
         self.btn_submit_server = QtWidgets.QPushButton("⇪  SUBMIT TO SERVER")
         self.btn_submit_server.setMinimumHeight(48)
+        self.btn_submit_server.setToolTip(
+            "Submit queued files to the network render server.\n"
+            "Right-click to preview the JSON / PowerShell payload."
+        )
+        self.btn_submit_server.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.btn_submit_server.customContextMenuRequested.connect(
+            lambda _pos: self._show_submit_payload_preview()
+        )
         render_bar.addWidget(self.btn_render_current)
         render_bar.addWidget(self.btn_render)
         render_bar.addWidget(self.btn_submit_server)
@@ -1263,6 +1271,134 @@ class BatchRenderDialog(QtWidgets.QDialog):
             self.log(f"Discovered server: {found}")
             return
         self.log("No server response found via broadcast discovery.")
+
+    def _build_submit_requests(self):
+        """Return [(label, request_dict), ...] that submit_to_server would POST.
+        Mirrors submit_to_server's request construction without contacting the server."""
+        import math, copy
+        out = []
+        for entry in self._get_submit_entries():
+            basename = os.path.basename(entry["path"])
+            request = self.build_job_request([entry["path"]], load_scene=True)
+            request["request_id"] = ""
+
+            var_json = entry.get("var_json", "")
+            if var_json:
+                override = self._load_variation_override(var_json, basename)
+                if override is not None:
+                    request["variation_override"] = override
+
+            csv_file = entry.get("csv_file", "")
+            if csv_file:
+                csv_data = self._load_csv_override(csv_file, basename)
+                if csv_data is not None:
+                    request["csv_override"] = csv_data
+
+            row_start = entry.get("row_start", 0)
+            row_end   = entry.get("row_end",   0)
+            if row_start > 0 or row_end > 0:
+                request["render_range"] = {"start": row_start, "end": row_end}
+
+            split_size = entry.get("split_size", 0)
+            if split_size > 0:
+                row_count = self._get_override_row_count(entry)
+                if row_count > 0:
+                    num_chunks = math.ceil(row_count / split_size)
+                    for chunk_idx in range(num_chunks):
+                        chunk_start = chunk_idx * split_size + 2
+                        chunk_end   = min((chunk_idx + 1) * split_size + 1, row_count + 1)
+                        chunk_req   = copy.deepcopy(request)
+                        chunk_req["render_range"] = {"start": chunk_start, "end": chunk_end}
+                        chunk_req["request_id"]   = ""
+                        out.append((f"{basename}  (chunk {chunk_idx+1}/{num_chunks})", chunk_req))
+                    continue
+
+            out.append((basename, request))
+        return out
+
+    def _show_submit_payload_preview(self):
+        """Open a read-only dialog showing the JSON / PowerShell payload that would
+        be POSTed to the server's /submit endpoint. Triggered by right-click on
+        the SUBMIT TO SERVER button."""
+        requests = self._build_submit_requests()
+        if not requests:
+            QtWidgets.QMessageBox.information(
+                self, "Submit Payload Preview",
+                "No queued files and no saved current scene to preview."
+            )
+            return
+
+        raw_url    = self.le_server_url.text().strip()
+        server_url = server_client.normalize_server_url(raw_url) if raw_url else "http://SERVER:PORT"
+        submit_url = f"{server_url}/submit"
+
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("Submit Payload Preview")
+        dlg.resize(820, 620)
+
+        root = QtWidgets.QVBoxLayout(dlg)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(8)
+
+        hdr = QtWidgets.QHBoxLayout()
+        hdr.addWidget(QtWidgets.QLabel("Entry:"))
+        cmb_entry = QtWidgets.QComboBox()
+        for label, _req in requests:
+            cmb_entry.addItem(label)
+        hdr.addWidget(cmb_entry, stretch=1)
+        hdr.addWidget(QtWidgets.QLabel("Format:"))
+        cmb_fmt = QtWidgets.QComboBox()
+        cmb_fmt.addItems(["JSON", "PowerShell"])
+        hdr.addWidget(cmb_fmt)
+        root.addLayout(hdr)
+
+        lbl_url = QtWidgets.QLabel(f"POST  {submit_url}")
+        lbl_url.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        root.addWidget(lbl_url)
+
+        txt = QtWidgets.QPlainTextEdit()
+        txt.setReadOnly(True)
+        txt.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
+        mono = QtGui.QFont("Consolas")
+        mono.setStyleHint(QtGui.QFont.Monospace)
+        txt.setFont(mono)
+        root.addWidget(txt, stretch=1)
+
+        btn_row = QtWidgets.QHBoxLayout()
+        btn_copy  = QtWidgets.QPushButton("Copy to Clipboard")
+        btn_close = QtWidgets.QPushButton("Close")
+        btn_row.addWidget(btn_copy)
+        btn_row.addStretch()
+        btn_row.addWidget(btn_close)
+        root.addLayout(btn_row)
+
+        def render_payload():
+            idx = cmb_entry.currentIndex()
+            if idx < 0:
+                return
+            _label, req = requests[idx]
+            json_text = schema.job_request_to_json(req, pretty=True)
+            if cmb_fmt.currentText() == "JSON":
+                txt.setPlainText(json_text)
+            else:
+                ps = (
+                    f"$server  = '{server_url}'\n"
+                    f"$payload = @'\n"
+                    f"{json_text}\n"
+                    f"'@\n"
+                    f"Invoke-RestMethod -Uri \"$server/submit\" -Method POST "
+                    f"-Body $payload -ContentType 'application/json'\n"
+                )
+                txt.setPlainText(ps)
+
+        cmb_entry.currentIndexChanged.connect(render_payload)
+        cmb_fmt.currentIndexChanged.connect(render_payload)
+        btn_copy.clicked.connect(
+            lambda: QtWidgets.QApplication.clipboard().setText(txt.toPlainText())
+        )
+        btn_close.clicked.connect(dlg.accept)
+        render_payload()
+        dlg.exec()
 
     def submit_to_server(self):
         entries = self._get_submit_entries()

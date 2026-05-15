@@ -777,20 +777,80 @@ class VariationManager(QtWidgets.QDialog):
         return super().eventFilter(obj, event)
 
     def _table_copy(self):
-        item = self.table.currentItem()
-        if item:
-            QtWidgets.QApplication.clipboard().setText(item.text())
+        """Copy selected cells as TSV (Excel-compatible)."""
+        ranges = self.table.selectedRanges()
+        if not ranges:
+            item = self.table.currentItem()
+            if item:
+                QtWidgets.QApplication.clipboard().setText(item.text())
+            return
+        rng = ranges[0]
+        lines = []
+        for r in range(rng.topRow(), rng.bottomRow() + 1):
+            row_vals = []
+            for c in range(rng.leftColumn(), rng.rightColumn() + 1):
+                it = self.table.item(r, c)
+                row_vals.append(it.text() if it else "")
+            lines.append("\t".join(row_vals))
+        QtWidgets.QApplication.clipboard().setText("\n".join(lines))
 
     def _table_paste(self):
-        text = QtWidgets.QApplication.clipboard().text().strip()
+        """Paste TSV clipboard into the table, expanding from the current cell.
+
+        - Multi-cell clipboard (TSV with tabs/newlines): pastes as a rectangular
+          block starting at the current cell, growing rows/cols if needed.
+        - Single-value clipboard: fills every selected cell with that value.
+        """
+        text = QtWidgets.QApplication.clipboard().text()
         if not text:
             return
+
+        # Strip a single trailing newline (common when copying from Excel).
+        if text.endswith("\r\n"):
+            text = text[:-2]
+        elif text.endswith("\n") or text.endswith("\r"):
+            text = text[:-1]
+
+        rows = [line.split("\t") for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+        is_block = len(rows) > 1 or (rows and len(rows[0]) > 1)
+
         self.table.blockSignals(True)
-        for sel_item in self.table.selectedItems():
-            sel_item.setText(text)
-        self.table.blockSignals(False)
+        try:
+            if is_block:
+                start_row = self.table.currentRow()
+                start_col = self.table.currentColumn()
+                if start_row < 0:
+                    start_row = 0
+                if start_col < 0:
+                    start_col = 0
+                for dr, row_vals in enumerate(rows):
+                    r = start_row + dr
+                    while r >= self.table.rowCount():
+                        self.table.insertRow(self.table.rowCount())
+                    for dc, val in enumerate(row_vals):
+                        c = start_col + dc
+                        if c >= self.table.columnCount():
+                            break  # don't auto-add columns; they have headers
+                        it = self.table.item(r, c)
+                        if it is None:
+                            it = QTableWidgetItem(val)
+                            self.table.setItem(r, c, it)
+                        else:
+                            it.setText(val)
+            else:
+                value = rows[0][0] if rows and rows[0] else ""
+                targets = self.table.selectedItems()
+                if not targets and self.table.currentItem():
+                    targets = [self.table.currentItem()]
+                for sel_item in targets:
+                    sel_item.setText(value)
+        finally:
+            self.table.blockSignals(False)
+
         if self.table.currentItem():
             self._on_cell_changed(self.table.currentItem())
+        else:
+            self.update_naming_preview()
 
     def _on_cell_changed(self, item):
         """Sanitize cell text on edit, then refresh the naming preview."""
