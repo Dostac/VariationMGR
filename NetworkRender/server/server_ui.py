@@ -2,6 +2,7 @@ import datetime
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from PySide6 import QtCore, QtWidgets
@@ -95,6 +96,19 @@ def _short_id(value, length=8):
     if len(text) <= length:
         return text
     return text[:length]
+
+
+def _fmt_duration(secs):
+    if not secs or secs <= 0:
+        return "-"
+    secs = int(secs)
+    if secs < 60:
+        return f"{secs}s"
+    m, s = divmod(secs, 60)
+    if m < 60:
+        return f"{m}m {s}s" if s else f"{m}m"
+    h, mm = divmod(m, 60)
+    return f"{h}h {mm}m" if mm else f"{h}h"
 
 
 def _short_path_tail(path_value, parts=3):
@@ -235,13 +249,14 @@ class ServerWindow(QtWidgets.QMainWindow):
         
         jobs_layout.addLayout(jobs_act_row)
 
-        self.tbl_jobs = QtWidgets.QTableWidget(0, 8)
+        self.tbl_jobs = QtWidgets.QTableWidget(0, 9)
         self.tbl_jobs.setHorizontalHeaderLabels([
             "Job ID",
             "Scene",
             "Output",
             "Status",
             "Host",
+            "Duration",
             "Attempts",
             "Updated",
             "Last Error",
@@ -262,9 +277,10 @@ class ServerWindow(QtWidgets.QMainWindow):
         self.tbl_jobs.setColumnWidth(2, 260)
         self.tbl_jobs.setColumnWidth(3, 110)
         self.tbl_jobs.setColumnWidth(4, 160)
-        self.tbl_jobs.setColumnWidth(5, 70)
-        self.tbl_jobs.setColumnWidth(6, 155)
-        self.tbl_jobs.setColumnWidth(7, 240)
+        self.tbl_jobs.setColumnWidth(5, 90)
+        self.tbl_jobs.setColumnWidth(6, 70)
+        self.tbl_jobs.setColumnWidth(7, 155)
+        self.tbl_jobs.setColumnWidth(8, 240)
         self.tbl_jobs.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
         self.tbl_jobs.customContextMenuRequested.connect(self.show_jobs_menu)
         self.tbl_jobs.cellDoubleClicked.connect(self._on_job_cell_double_clicked)
@@ -305,9 +321,9 @@ class ServerWindow(QtWidgets.QMainWindow):
         table.setItem(row, col, item)
 
     def refresh(self):
-        if self.chk_auto_requeue.isChecked():
-            self.runtime.state.requeue_failed_jobs(max_attempts=2)
-
+        # Auto-requeue runs in a background thread inside ServerRuntime now,
+        # gated on state.is_auto_requeue_failed(). No need to drive it from
+        # the UI refresh tick.
         stats = self.runtime.state.stats()
         workers = self.runtime.state.list_workers()
         jobs = self.runtime.state.list_jobs()
@@ -370,6 +386,7 @@ class ServerWindow(QtWidgets.QMainWindow):
             self._set_item(self.tbl_workers, row, 3, _fmt_ts(w.get("last_seen")))
         self._updating_jobs = True
         try:
+            now = time.time()
             self.tbl_jobs.setRowCount(len(jobs))
             for row, j in enumerate(jobs):
                 scene_job = j.get("scene_job", {}) or {}
@@ -383,6 +400,23 @@ class ServerWindow(QtWidgets.QMainWindow):
                     host = j.get("claimed_by_host", "")
                 scene_name = os.path.basename(scene) if scene else ""
                 id_tooltip = f"Job ID: {job_id}\nRequest ID: {req_id}"
+
+                started_ts = float(j.get("started_at") or 0)
+                finished_ts = float(j.get("finished_at") or 0)
+                status_lower = (j.get("status", "") or "").lower()
+                if finished_ts and started_ts and finished_ts >= started_ts:
+                    duration = finished_ts - started_ts
+                elif started_ts and status_lower in ("running", "claimed"):
+                    duration = max(0.0, now - started_ts)
+                else:
+                    duration = 0.0
+                duration_text = _fmt_duration(duration)
+                duration_tooltip = ""
+                if started_ts:
+                    duration_tooltip = f"Started: {_fmt_ts(started_ts)}"
+                    if finished_ts:
+                        duration_tooltip += f"\nFinished: {_fmt_ts(finished_ts)}"
+
                 self._set_item(self.tbl_jobs, row, 0, _short_id(job_id), tooltip=id_tooltip, user_data=job_id)
                 self._set_item(self.tbl_jobs, row, 1, scene_name, tooltip=scene, user_data=scene)
                 self._set_item(
@@ -395,9 +429,10 @@ class ServerWindow(QtWidgets.QMainWindow):
                 )
                 self._set_item(self.tbl_jobs, row, 3, j.get("status", ""))
                 self._set_item(self.tbl_jobs, row, 4, host, tooltip=claimed_by, user_data=claimed_by)
-                self._set_item(self.tbl_jobs, row, 5, j.get("attempts", 0))
-                self._set_item(self.tbl_jobs, row, 6, _fmt_ts(j.get("updated_at")))
-                self._set_item(self.tbl_jobs, row, 7, j.get("last_error", ""))
+                self._set_item(self.tbl_jobs, row, 5, duration_text, tooltip=duration_tooltip)
+                self._set_item(self.tbl_jobs, row, 6, j.get("attempts", 0))
+                self._set_item(self.tbl_jobs, row, 7, _fmt_ts(j.get("updated_at")))
+                self._set_item(self.tbl_jobs, row, 8, j.get("last_error", ""))
         finally:
             self._updating_jobs = False
 

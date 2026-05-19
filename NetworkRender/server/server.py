@@ -29,6 +29,16 @@ DISCOVERY_MAGIC = "VB_BATCH_DISCOVER_V1"
 MAX_REQUEST_BODY_BYTES = 10 * 1024 * 1024
 DEFAULT_STALE_REQUEUE_SECONDS = 900
 
+# Required on every mutating /admin/* request. Browsers cannot send custom
+# headers cross-origin without a CORS preflight, and we never send the
+# matching Access-Control-Allow-Headers, so this blocks drive-by POSTs from
+# any non-dashboard origin. The dashboard JS adds this header explicitly.
+CSRF_HEADER = "X-VB-Request"
+CSRF_HEADER_EXPECTED = "1"
+
+AUTO_REQUEUE_TICK_SECONDS = 5
+AUTO_REQUEUE_MAX_ATTEMPTS = 2
+
 
 def _default_server_state_path():
     local_appdata = os.environ.get("LOCALAPPDATA", "").strip()
@@ -178,6 +188,8 @@ class JobServerState:
                 job["status"] = "queued"
                 job["claimed_by"] = None
                 job["updated_at"] = utc_now()
+                job["started_at"] = 0
+                job["finished_at"] = 0
                 if job_id not in in_queue:
                     self.queue.append(job_id)
                     in_queue.add(job_id)
@@ -277,6 +289,8 @@ class JobServerState:
                     "scene_job": scene_job,
                     "created_at": now,
                     "updated_at": now,
+                    "started_at": 0,
+                    "finished_at": 0,
                     "claimed_by": None,
                     "attempts": 0,
                     "last_error": "",
@@ -415,6 +429,20 @@ class JobServerState:
             if isinstance(result, dict):
                 job["result"] = result
 
+            # Stamp duration milestones. started_at is set on the first
+            # running report and never overwritten; finished_at is rewritten
+            # on each terminal report (failure followed by retry will reset).
+            if new_status == "running":
+                if not job.get("started_at"):
+                    job["started_at"] = now
+            elif new_status in ("done", "failed"):
+                if not job.get("started_at"):
+                    job["started_at"] = now
+                job["finished_at"] = now
+            elif new_status == "queued":
+                job["started_at"] = 0
+                job["finished_at"] = 0
+
             if new_status == "queued":
                 # Requeue explicitly requested retries.
                 if job_id not in self.queue:
@@ -468,6 +496,8 @@ class JobServerState:
                 job["status"] = "queued"
                 job["claimed_by"] = None
                 job["updated_at"] = now
+                job["started_at"] = 0
+                job["finished_at"] = 0
                 if job_id not in in_queue:
                     self.queue.append(job_id)
                     in_queue.add(job_id)
@@ -490,6 +520,8 @@ class JobServerState:
                 job["status"] = "queued"
                 job["claimed_by"] = None
                 job["updated_at"] = now
+                job["started_at"] = 0
+                job["finished_at"] = 0
                 if job_id not in in_queue:
                     self.queue.append(job_id)
                     in_queue.add(job_id)
@@ -525,6 +557,8 @@ class JobServerState:
                 job["claimed_by"] = None
                 job["last_error"] = ""
                 job["updated_at"] = now
+                job["started_at"] = 0
+                job["finished_at"] = 0
                 if job_id not in in_queue:
                     self.queue.append(job_id)
                     in_queue.add(job_id)
@@ -683,6 +717,123 @@ class JobServerHTTP(ThreadingHTTPServer):
         self.local_only = local_only
 
 
+def build_dashboard_payload(server):
+    """Pre-resolved snapshot used by the web dashboard JS poller.
+
+    Resolves worker/job names so the browser never has to know about
+    worker_ids or job UUIDs. Strips internal-only fields.
+    """
+    state = server.state
+    stats = state.stats()
+    workers = state.list_workers()
+    jobs = state.list_jobs()
+
+    workers_by_id = {str(w.get("worker_id", "")): w for w in workers}
+    jobs_by_id = {str(j.get("job_id", "")): j for j in jobs}
+
+    # We display the worker's hostname everywhere on the dashboard. The
+    # internal worker_name carries an id suffix (for log disambiguation) that
+    # we deliberately keep out of the UI. For jobs claimed by a worker that
+    # has since disconnected, fall back to claimed_by_host stored on the job
+    # at claim time so the row keeps showing who did the work.
+    worker_rows = []
+    for w in workers:
+        cur_id = str(w.get("current_job_id") or "")
+        cur_scene = ""
+        if cur_id:
+            cur_job = jobs_by_id.get(cur_id)
+            if cur_job:
+                scene_path = str((cur_job.get("scene_job", {}) or {}).get("scene_file", "") or "")
+                if scene_path:
+                    cur_scene = os.path.basename(scene_path) or scene_path
+        worker_rows.append({
+            "name": w.get("host") or w.get("worker_name") or "",
+            "status": w.get("status", ""),
+            "current_scene": cur_scene,
+            "last_seen_ts": w.get("last_seen") or 0,
+        })
+
+    now_ts = time.time()
+    # Collected (finished_at, duration) tuples for the rolling average below.
+    done_pairs = []
+
+    job_rows = []
+    for j in jobs:
+        scene_job = j.get("scene_job", {}) or {}
+        scene_path = str(scene_job.get("scene_file", "") or "")
+        output_folder = str((scene_job.get("output", {}) or {}).get("folder", "") or "")
+        claimed_by = str(j.get("claimed_by") or "")
+        worker_label = ""
+        if claimed_by:
+            worker_label = workers_by_id.get(claimed_by, {}).get("host", "") or ""
+        if not worker_label:
+            worker_label = j.get("claimed_by_host", "") or ""
+
+        started_ts = float(j.get("started_at") or 0)
+        finished_ts = float(j.get("finished_at") or 0)
+        status_norm = str(j.get("status", "") or "").lower()
+        duration = 0.0
+        if finished_ts and started_ts and finished_ts >= started_ts:
+            duration = finished_ts - started_ts
+            if status_norm == "done":
+                done_pairs.append((finished_ts, duration))
+        elif started_ts and status_norm in ("running", "claimed"):
+            duration = max(0.0, now_ts - started_ts)
+
+        job_rows.append({
+            "job_id": j.get("job_id", ""),
+            "scene_name": os.path.basename(scene_path) if scene_path else "",
+            "scene_path": scene_path,
+            "output_folder": output_folder,
+            "status": j.get("status", ""),
+            "worker_name": worker_label,
+            "attempts": int(j.get("attempts", 0)),
+            "started_at_ts": started_ts,
+            "finished_at_ts": finished_ts,
+            "duration_seconds": duration,
+            "updated_at_ts": j.get("updated_at") or 0,
+            "last_error": j.get("last_error", "") or "",
+        })
+
+    # Rolling average over the most recent N completed jobs. Using the most
+    # recent ones (by finished_at) keeps the average tracking the current
+    # scene mix instead of ancient outliers.
+    avg_duration = 0.0
+    if done_pairs:
+        done_pairs.sort(reverse=True)
+        recent = done_pairs[:20]
+        avg_duration = sum(d for _, d in recent) / len(recent)
+
+    queued_count = stats.get("by_status", {}).get("queued", 0)
+    running_count = (
+        stats.get("by_status", {}).get("running", 0)
+        + stats.get("by_status", {}).get("claimed", 0)
+    )
+    active_worker_count = len(workers)
+    eta_seconds = 0.0
+    if avg_duration > 0 and active_worker_count > 0 and not state.is_queue_paused():
+        # Running jobs count as one full average each (we don't know their
+        # remaining time). Conservative; gets better as more jobs finish.
+        eta_seconds = ((queued_count + running_count) * avg_duration) / active_worker_count
+
+    host, port = server.server_address[0], server.server_address[1]
+    return {
+        "now_ts": now_ts,
+        "server": {
+            "host": host,
+            "port": port,
+            "local_only": bool(server.local_only),
+        },
+        "stats": stats,
+        "queue_paused": state.is_queue_paused(),
+        "auto_requeue_failed": state.is_auto_requeue_failed(),
+        "avg_duration_seconds": avg_duration,
+        "eta_seconds": eta_seconds,
+        "workers": worker_rows,
+        "jobs": job_rows,
+    }
+
+
 class RequestHandler(BaseHTTPRequestHandler):
     # Intentionally no auth layer: this server is designed for trusted LAN use.
     # Enforce local-only mode unless --allow-non-local is explicitly enabled.
@@ -722,6 +873,20 @@ class RequestHandler(BaseHTTPRequestHandler):
         if _is_local_network_ip(ip):
             return False
         self._json(HTTPStatus.FORBIDDEN, {"error": "local_network_only"})
+        return True
+
+    def _deny_if_missing_csrf(self):
+        """Reject mutating /admin/* requests that don't carry the CSRF header.
+
+        Browsers can't send custom headers cross-origin without a CORS
+        preflight that we never grant, so any request reaching this point
+        with the header set originates from our own dashboard JS (or a
+        deliberate same-origin client).
+        """
+        got = (self.headers.get(CSRF_HEADER) or "").strip()
+        if got == CSRF_HEADER_EXPECTED:
+            return False
+        self._json(HTTPStatus.FORBIDDEN, {"error": "csrf_header_required"})
         return True
 
     def _parse_json_body(self):
@@ -765,6 +930,10 @@ class RequestHandler(BaseHTTPRequestHandler):
                     "stats": self.server.state.stats(),
                 },
             )
+            return
+
+        if path == "/dashboard_data":
+            self._json(HTTPStatus.OK, build_dashboard_payload(self.server))
             return
 
         if path == "/jobs":
@@ -899,10 +1068,67 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.OK, job)
             return
 
-        if path == "/admin/requeue_stale":
-            stale_seconds = int((payload or {}).get("stale_seconds", DEFAULT_STALE_REQUEUE_SECONDS))
-            requeued = self.server.state.requeue_stale_claims(stale_seconds)
-            self._json(HTTPStatus.OK, {"requeued": requeued, "count": len(requeued)})
+        if path.startswith("/admin/"):
+            if self._deny_if_missing_csrf():
+                return
+            payload_dict = payload if isinstance(payload, dict) else {}
+
+            if path == "/admin/requeue_stale":
+                stale_seconds = int(payload_dict.get("stale_seconds", DEFAULT_STALE_REQUEUE_SECONDS))
+                requeued = self.server.state.requeue_stale_claims(stale_seconds)
+                self._json(HTTPStatus.OK, {"requeued": requeued, "count": len(requeued)})
+                return
+
+            if path == "/admin/queue/pause":
+                paused = bool(payload_dict.get("paused", False))
+                self.server.state.set_queue_paused(paused)
+                self._json(HTTPStatus.OK, {"queue_paused": paused})
+                return
+
+            if path == "/admin/auto_requeue":
+                enabled = bool(payload_dict.get("enabled", False))
+                self.server.state.set_auto_requeue_failed(enabled)
+                self._json(HTTPStatus.OK, {"auto_requeue_failed": enabled})
+                return
+
+            if path == "/admin/jobs/requeue":
+                job_ids = payload_dict.get("job_ids") or []
+                if not isinstance(job_ids, list):
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "job_ids must be a list"})
+                    return
+                requeued = self.server.state.requeue_jobs([str(j) for j in job_ids])
+                self._json(HTTPStatus.OK, {"requeued": requeued, "count": len(requeued)})
+                return
+
+            if path == "/admin/jobs/remove":
+                job_ids = payload_dict.get("job_ids") or []
+                if not isinstance(job_ids, list):
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "job_ids must be a list"})
+                    return
+                removed = self.server.state.remove_jobs([str(j) for j in job_ids])
+                self._json(HTTPStatus.OK, {"removed": removed})
+                return
+
+            if path == "/admin/jobs/clear_queue":
+                removed = self.server.state.clear_queue()
+                self._json(HTTPStatus.OK, {"removed": removed})
+                return
+
+            if path == "/admin/jobs/remove_by_status":
+                statuses = payload_dict.get("statuses") or []
+                if not isinstance(statuses, list):
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "statuses must be a list"})
+                    return
+                removed = self.server.state.remove_jobs_by_status(statuses)
+                self._json(HTTPStatus.OK, {"removed": removed})
+                return
+
+            if path == "/admin/jobs/clear_all":
+                removed = self.server.state.clear_all_jobs()
+                self._json(HTTPStatus.OK, {"removed": removed})
+                return
+
+            self._json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
             return
 
         self._json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
@@ -921,7 +1147,17 @@ class ServerRuntime:
         self.stop_event = threading.Event()
         self.discovery = None
         self._thread = None
+        self._auto_requeue_thread = None
         self._started = False
+
+    def _auto_requeue_loop(self):
+        while not self.stop_event.is_set():
+            try:
+                if self.state.is_auto_requeue_failed():
+                    self.state.requeue_failed_jobs(max_attempts=AUTO_REQUEUE_MAX_ATTEMPTS)
+            except Exception:
+                pass
+            self.stop_event.wait(AUTO_REQUEUE_TICK_SECONDS)
 
     def start(self):
         if self._started:
@@ -948,6 +1184,14 @@ class ServerRuntime:
             daemon=True,
         )
         self._thread.start()
+
+        self._auto_requeue_thread = threading.Thread(
+            target=self._auto_requeue_loop,
+            daemon=True,
+            name="auto-requeue",
+        )
+        self._auto_requeue_thread.start()
+
         self._started = True
 
     def stop(self):
@@ -965,6 +1209,8 @@ class ServerRuntime:
         self.state.save()
         if self._thread is not None:
             self._thread.join(timeout=2.0)
+        if self._auto_requeue_thread is not None:
+            self._auto_requeue_thread.join(timeout=2.0)
         self._started = False
 
     def wait_forever(self):
