@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>__TITLE__</title>
+  <link rel="stylesheet" href="/static/server_dashboard.css">
+</head>
+<body>
+  <div class="wrap">
+
+    <!-- ── Top bar ────────────────────────────────────────────────────── -->
+    <header class="topbar">
+      <h1>Render Server</h1>
+      <span class="hero-badge" id="hero-status">Active</span>
+      <div class="pill-row">
+        <div class="pill" id="pill-http">HTTP __HTTP_ADDR__</div>
+        <div class="pill" id="pill-workers">Workers —</div>
+        <div class="pill" id="pill-queue"><span class="status-indicator processing">…</span></div>
+        <div class="pill" id="pill-eta" title="Estimated time to clear the queue">ETA —</div>
+        <div class="pill" id="pill-updated">—</div>
+        <button class="btn btn-tonal" id="btn-pause" style="margin-left:4px">⏸ Pause</button>
+      </div>
+    </header>
+
+    <!-- ── Two-column: Progress/Stats (left) + Workers (right) ────────── -->
+    <div class="main-cols">
+
+      <!-- LEFT: progress + stat row -->
+      <div class="panel">
+        <div class="progress-head">
+          <div class="progress-label">Total Progress</div>
+          <div class="progress-pct-val" id="progress-pct">—%</div>
+        </div>
+        <div class="progress-big" id="progress-done">—</div>
+        <div class="progress-detail" id="progress-text">of — jobs complete</div>
+        <div class="progress"><div class="bar" id="progress-bar" style="width:0%"></div></div>
+
+        <div class="stats-row" id="stats-row">
+          <div class="stat-inline"><span class="si-dot" style="background:var(--green)"></span><span class="si-label">Done</span><span class="si-value green" id="si-done">—</span></div>
+          <div class="stat-inline"><span class="si-dot" style="background:var(--blue)"></span><span class="si-label">Running</span><span class="si-value blue" id="si-running">—</span></div>
+          <div class="stat-inline"><span class="si-dot" style="background:var(--text-dim)"></span><span class="si-label">Queued</span><span class="si-value" id="si-queued">—</span></div>
+          <div class="stat-inline"><span class="si-dot" style="background:var(--red)"></span><span class="si-label">Failed</span><span class="si-value red" id="si-failed">—</span></div>
+          <div class="stats-meta" id="stats-meta">avg — · eta —</div>
+        </div>
+      </div>
+
+      <!-- RIGHT: workers -->
+      <div class="panel panel-workers">
+        <div class="workers-header">
+          <h2>Workers</h2>
+          <span class="workers-status" id="workers-status">—</span>
+        </div>
+        <div class="worker-note">→ each worker has a color, reused everywhere it appears below</div>
+        <div id="workers-list">
+          <div class="worker-row"><span class="worker-name" style="color:var(--text-muted)">Loading…</span></div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- ── Performance ───────────────────────────────────────────────── -->
+    <section class="panel" id="perf-panel">
+      <div class="panel-head">
+        <h2>Performance</h2>
+        <div class="panel-actions perf-filters">
+          <div class="filter-group" id="worker-chips">
+            <span class="filter-label">Workers</span>
+            <button class="chip-btn active" data-worker-all>All</button>
+          </div>
+          <div class="filter-group">
+            <span class="filter-label">Status</span>
+            <select id="perf-status" class="select">
+              <option value="done">Done only</option>
+              <option value="done_failed">Done + Failed</option>
+            </select>
+          </div>
+          <div class="filter-group">
+            <span class="filter-label">Window</span>
+            <select id="perf-window" class="select">
+              <option value="all">All time</option>
+              <option value="24h">Last 24 h</option>
+              <option value="1h">Last hour</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <div class="stat-strip">
+        <div class="stat">
+          <div class="s-label">Count</div>
+          <div class="s-value" id="stat-count">—</div>
+          <div class="s-sub">jobs</div>
+        </div>
+        <div class="stat">
+          <div class="s-label">Average</div>
+          <div class="s-value" id="stat-avg">—</div>
+          <div class="s-sub">per job</div>
+        </div>
+        <div class="stat">
+          <div class="s-label">Median</div>
+          <div class="s-value" id="stat-median">—</div>
+          <div class="s-sub">per job</div>
+        </div>
+        <div class="stat">
+          <div class="s-label">Min</div>
+          <div class="s-value" id="stat-min">—</div>
+          <div class="s-sub">duration</div>
+        </div>
+        <div class="stat">
+          <div class="s-label">Max</div>
+          <div class="s-value" id="stat-max">—</div>
+          <div class="s-sub">duration</div>
+        </div>
+      </div>
+
+      <div class="chart-grid">
+        <div class="chart-card">
+          <div class="chart-title">Jobs by Worker</div>
+          <div class="chart-subtitle">Completed job count · who's pulling weight</div>
+          <div class="chart-body" id="chart-pie"></div>
+        </div>
+        <div class="chart-card">
+          <div class="chart-title">Avg Duration by Worker</div>
+          <div class="chart-subtitle">Mean render time · lower = faster</div>
+          <div class="chart-body" id="chart-bars"></div>
+        </div>
+        <div class="chart-card">
+          <div class="chart-title">Recent Activity · Timeline</div>
+          <div class="chart-subtitle">Each block = one render · width = duration · placed at start time</div>
+          <div class="chart-body chart-swimlane" id="chart-swimlane"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Jobs ──────────────────────────────────────────────────────── -->
+    <section class="panel">
+      <!-- One-row header: title + total + tabs + auto-requeue toggle -->
+      <div class="jobs-head">
+        <h2>Jobs</h2>
+        <span class="jobs-total-badge" id="jobs-total-badge">—</span>
+        <div class="job-tabs" id="job-tabs">
+          <button class="job-tab active" data-tab="all">All <span class="tab-count" id="tab-cnt-all">0</span></button>
+          <button class="job-tab" data-tab="done">Done <span class="tab-count" id="tab-cnt-done">0</span></button>
+          <button class="job-tab" data-tab="running">Running <span class="tab-count" id="tab-cnt-running">0</span></button>
+          <button class="job-tab" data-tab="queued">Queued <span class="tab-count" id="tab-cnt-queued">0</span></button>
+          <button class="job-tab" data-tab="failed">Failed <span class="tab-count" id="tab-cnt-failed">0</span></button>
+        </div>
+        <label class="toggle" style="margin-left:auto">
+          <input type="checkbox" id="chk-auto-requeue">
+          Auto-requeue failed
+        </label>
+      </div>
+
+      <!-- Action buttons row -->
+      <div class="jobs-actions" style="margin-bottom:10px">
+        <button class="btn" id="btn-requeue-sel" disabled>Requeue Selected</button>
+        <button class="btn btn-danger" id="btn-remove-sel" disabled>Remove Selected</button>
+        <span class="sep"></span>
+        <button class="btn" id="btn-clear-queue">Clear Queue</button>
+        <button class="btn" id="btn-remove-done">Remove Done</button>
+        <button class="btn" id="btn-remove-failed">Remove Failed</button>
+        <button class="btn btn-danger" id="btn-clear-all">Clear All</button>
+      </div>
+
+      <table class="t-jobs">
+        <thead>
+          <tr>
+            <th class="col-check"><input type="checkbox" id="chk-all"></th>
+            <th>Scene</th>
+            <th>Output</th>
+            <th>Status</th>
+            <th>Worker</th>
+            <th>Duration</th>
+            <th>Att.</th>
+            <th>Updated</th>
+            <th>Last Error</th>
+          </tr>
+        </thead>
+        <tbody id="tbody-jobs">
+          <tr><td colspan="9" class="empty">Loading…</td></tr>
+        </tbody>
+      </table>
+      <div class="foot" id="jobs-foot">—</div>
+    </section>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  </div>
+
+  <script>const CFG = __CFG__;</script>
+  <script src="/static/server_dashboard.js"></script>
+</body>
+</html>

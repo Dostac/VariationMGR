@@ -22,7 +22,7 @@ if __package__ is None or __package__ == "":
         sys.path.insert(0, str(repo_root))
 
 from NetworkRender.shared import job_schema as schema
-from NetworkRender.server.server_dashboard import read_stylesheet, render_dashboard
+from NetworkRender.server.server_dashboard import read_js, read_stylesheet, render_dashboard
 
 
 DISCOVERY_MAGIC = "VB_BATCH_DISCOVER_V1"
@@ -866,6 +866,14 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _js(self, code, body_text):
+        body = body_text.encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/javascript; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def _deny_if_not_local(self):
         if not self.server.local_only:
             return False
@@ -919,6 +927,9 @@ class RequestHandler(BaseHTTPRequestHandler):
 
         if path == "/static/server_dashboard.css":
             self._css(HTTPStatus.OK, read_stylesheet())
+            return
+        if path == "/static/server_dashboard.js":
+            self._js(HTTPStatus.OK, read_js())
             return
 
         if path == "/health":
