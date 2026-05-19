@@ -138,15 +138,12 @@ class ServerWindow(QtWidgets.QMainWindow):
         info_row.addWidget(self.lbl_info, stretch=1)
 
         self.btn_refresh = QtWidgets.QPushButton("Refresh")
-        self.btn_repair = QtWidgets.QPushButton("Repair State")
-        self.btn_repair.setToolTip("Repair stale queue/request references from server_state.json")
-        
+
         self.btn_pause_resume = QtWidgets.QPushButton("")
         self.btn_pause_resume.setFixedWidth(28)  # MD3 icon-action button fixed width
         self.btn_pause_resume.setToolTip("Pause/resume assigning queued jobs to workers.")
 
         info_row.addWidget(self.btn_refresh)
-        info_row.addWidget(self.btn_repair)
         info_row.addWidget(self.btn_pause_resume)
         
         top_layout.addLayout(info_row)
@@ -211,6 +208,8 @@ class ServerWindow(QtWidgets.QMainWindow):
             "When checked, failed jobs with fewer than 2 attempts are automatically\n"
             "requeued on every refresh cycle."
         )
+        self.chk_auto_requeue.setChecked(self.runtime.state.is_auto_requeue_failed())
+        self.chk_auto_requeue.toggled.connect(self.runtime.state.set_auto_requeue_failed)
         self.btn_requeue = QtWidgets.QPushButton("Requeue Stale")
         self.btn_requeue.setToolTip("Requeue claimed/running jobs stale for 15+ min")
         
@@ -255,6 +254,7 @@ class ServerWindow(QtWidgets.QMainWindow):
         self.tbl_jobs.setAlternatingRowColors(True)
         self.tbl_jobs.setShowGrid(False)
         self.tbl_jobs.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.tbl_jobs.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
         self.tbl_jobs.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         self.tbl_jobs.setItemDelegateForColumn(3, StatusChipDelegate(self.tbl_jobs))
         self.tbl_jobs.setColumnWidth(0, 100)
@@ -267,6 +267,7 @@ class ServerWindow(QtWidgets.QMainWindow):
         self.tbl_jobs.setColumnWidth(7, 240)
         self.tbl_jobs.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
         self.tbl_jobs.customContextMenuRequested.connect(self.show_jobs_menu)
+        self.tbl_jobs.cellDoubleClicked.connect(self._on_job_cell_double_clicked)
         jobs_layout.addWidget(self.tbl_jobs)
 
         splitter.addWidget(jobs_panel)
@@ -276,7 +277,6 @@ class ServerWindow(QtWidgets.QMainWindow):
 
         # Logic Connections
         self.btn_refresh.clicked.connect(self.refresh)
-        self.btn_repair.clicked.connect(self.repair_state)
         self.btn_requeue.clicked.connect(self.requeue_stale)
         self.btn_remove_done.clicked.connect(self.remove_done_jobs)
         self.btn_remove_failed.clicked.connect(self.remove_failed_jobs)
@@ -331,18 +331,9 @@ class ServerWindow(QtWidgets.QMainWindow):
             f"Done={done} ({pct}%)"
         )
 
-        style = self.style() if self.style() else QtWidgets.QApplication.style()
-        # Removed non-compliant dynamic stylesheet updates that injected fonts and paddings
-        if paused:
-            self.btn_pause_resume.setText("")
-            self.btn_pause_resume.setIcon(
-                style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MediaPlay)
-            )
-        else:
-            self.btn_pause_resume.setText("")
-            self.btn_pause_resume.setIcon(
-                style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MediaPause)
-            )
+        # Use unicode glyphs as button text so the color follows the palette,
+        # rather than the OS-styled (black) standard media icons.
+        self.btn_pause_resume.setText("▶" if paused else "⏸")
 
         self.tbl_workers.setRowCount(len(workers))
         for row, w in enumerate(workers):
@@ -511,15 +502,6 @@ class ServerWindow(QtWidgets.QMainWindow):
         )
         self.refresh()
 
-    def repair_state(self):
-        changed = self.runtime.state.repair_state(save=True)
-        QtWidgets.QMessageBox.information(
-            self,
-            "Repair State",
-            "State repaired and saved." if changed else "No state issues found.",
-        )
-        self.refresh()
-
     @staticmethod
     def _to_native_path(path_str):
         """Convert forward-slash paths to Windows backslash form."""
@@ -551,69 +533,113 @@ class ServerWindow(QtWidgets.QMainWindow):
                 f"Could not open folder for:\n{native}\n\n{exc}",
             )
 
+    def _job_id_at_row(self, row):
+        item = self.tbl_jobs.item(row, 0)
+        if item is None:
+            return ""
+        job_id = str(item.data(QtCore.Qt.ItemDataRole.UserRole) or "").strip()
+        if not job_id:
+            job_id = (item.text() or "").strip()
+        return job_id
+
+    def _user_data_at(self, row, col):
+        item = self.tbl_jobs.item(row, col)
+        if item is None:
+            return ""
+        return str(item.data(QtCore.Qt.ItemDataRole.UserRole) or "").strip()
+
     def show_jobs_menu(self, pos):
         if self._updating_jobs:
             return
-        item = self.tbl_jobs.itemAt(pos)
-        if item is None:
-            return
-        row = item.row()
-        job_id_item = self.tbl_jobs.item(row, 0)
-        if job_id_item is None:
-            return
-        job_id = str(job_id_item.data(QtCore.Qt.ItemDataRole.UserRole) or "").strip()
-        if not job_id:
-            job_id = (job_id_item.text() or "").strip()
-        if not job_id:
+
+        rows = sorted({idx.row() for idx in self.tbl_jobs.selectionModel().selectedRows()})
+        if not rows:
+            item = self.tbl_jobs.itemAt(pos)
+            if item is None:
+                return
+            rows = [item.row()]
+
+        job_ids = [jid for jid in (self._job_id_at_row(r) for r in rows) if jid]
+        if not job_ids:
             return
 
-        # Col 1 = Scene (user_data = full scene path), Col 2 = Output (user_data = full folder)
-        scene_path = ""
-        scene_item = self.tbl_jobs.item(row, 1)
-        if scene_item is not None:
-            scene_path = str(scene_item.data(QtCore.Qt.ItemDataRole.UserRole) or "").strip()
-
-        output_folder = ""
-        output_item = self.tbl_jobs.item(row, 2)
-        if output_item is not None:
-            output_folder = str(output_item.data(QtCore.Qt.ItemDataRole.UserRole) or "").strip()
-
+        multi = len(job_ids) > 1
         menu = QtWidgets.QMenu(self.tbl_jobs)
         act_open_scene = None
         act_open_output = None
-        if scene_path:
-            act_open_scene = menu.addAction("Open Scene Folder")
-        if output_folder:
-            act_open_output = menu.addAction("Show Output in Explorer")
-        if scene_path or output_folder:
-            menu.addSeparator()
-        act_remove = menu.addAction("Remove Job")
+
+        if not multi:
+            scene_path = self._user_data_at(rows[0], 1)
+            output_folder = self._user_data_at(rows[0], 2)
+            if scene_path:
+                act_open_scene = menu.addAction("Open Scene Folder")
+            if output_folder:
+                act_open_output = menu.addAction("Show Output in Explorer")
+            if scene_path or output_folder:
+                menu.addSeparator()
+
+        act_requeue = menu.addAction(f"Requeue {len(job_ids)} Jobs" if multi else "Requeue Job")
+        act_remove = menu.addAction(f"Remove {len(job_ids)} Jobs" if multi else "Remove Job")
 
         action = menu.exec(self.tbl_jobs.viewport().mapToGlobal(pos))
-
+        if action is None:
+            return
         if action == act_open_scene:
-            self._open_file_selected(scene_path)
+            self._open_file_selected(self._user_data_at(rows[0], 1))
             return
         if action == act_open_output:
-            self._open_folder(output_folder)
+            self._open_folder(self._user_data_at(rows[0], 2))
             return
-        if action != act_remove:
+        if action == act_requeue:
+            self._requeue_jobs(job_ids)
+            return
+        if action == act_remove:
+            self._remove_selected_jobs(job_ids)
             return
 
+    def _requeue_jobs(self, job_ids):
+        n = len(job_ids)
+        if n > 1:
+            answer = QtWidgets.QMessageBox.question(
+                self,
+                "Requeue Jobs",
+                f"Requeue {n} job(s)?\n\nThey will go back into the queue regardless of current status.",
+                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+                QtWidgets.QMessageBox.StandardButton.Yes,
+            )
+            if answer != QtWidgets.QMessageBox.StandardButton.Yes:
+                return
+        requeued = self.runtime.state.requeue_jobs(job_ids)
+        if not requeued:
+            QtWidgets.QMessageBox.warning(self, "Requeue Jobs", "No matching jobs to requeue.")
+        self.refresh()
+
+    def _remove_selected_jobs(self, job_ids):
+        n = len(job_ids)
+        prompt = f"Remove {n} jobs?" if n > 1 else f"Remove job {job_ids[0]}?"
         answer = QtWidgets.QMessageBox.question(
             self,
-            "Remove Job",
-            f"Remove job {job_id}?",
+            "Remove Jobs",
+            prompt,
             QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
             QtWidgets.QMessageBox.StandardButton.No,
         )
         if answer != QtWidgets.QMessageBox.StandardButton.Yes:
             return
-
-        ok = self.runtime.state.remove_job(job_id)
-        if not ok:
-            QtWidgets.QMessageBox.warning(self, "Remove Job", "Job not found or already removed.")
+        removed = self.runtime.state.remove_jobs(job_ids)
+        if not removed:
+            QtWidgets.QMessageBox.warning(self, "Remove Jobs", "No matching jobs to remove.")
         self.refresh()
+
+    def _on_job_cell_double_clicked(self, row, col):
+        if col == 1:
+            path = self._user_data_at(row, 1)
+            if path:
+                self._open_file_selected(path)
+        elif col == 2:
+            folder = self._user_data_at(row, 2)
+            if folder:
+                self._open_folder(folder)
 
 
 def run_server_ui(host, port, state_file, local_only=True, enable_discovery=True):

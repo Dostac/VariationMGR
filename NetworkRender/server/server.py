@@ -113,6 +113,7 @@ class JobServerState:
         self.requests = {}
         self.workers = {}
         self.queue_paused = False
+        self.auto_requeue_failed = False
         self.load()
 
     def load(self):
@@ -126,6 +127,7 @@ class JobServerState:
             self.requests = payload.get("requests", {})
             self.workers = {}  # workers are ephemeral; never restored from disk
             self.queue_paused = bool(payload.get("queue_paused", False))
+            self.auto_requeue_failed = bool(payload.get("auto_requeue_failed", False))
             self.repair_state(save=False)
 
     def save(self):
@@ -135,6 +137,7 @@ class JobServerState:
                 "queue": list(self.queue),
                 "requests": self.requests,
                 "queue_paused": self.queue_paused,
+                "auto_requeue_failed": self.auto_requeue_failed,
             }
             _atomic_json_save(self.state_file, payload)
 
@@ -231,6 +234,16 @@ class JobServerState:
             self.queue_paused = bool(paused)
             self.save()
             return self.queue_paused
+
+    def is_auto_requeue_failed(self):
+        with self.lock:
+            return bool(self.auto_requeue_failed)
+
+    def set_auto_requeue_failed(self, enabled):
+        with self.lock:
+            self.auto_requeue_failed = bool(enabled)
+            self.save()
+            return self.auto_requeue_failed
 
     def submit_request(self, raw_request):
         normalized = schema.normalize_job_request(raw_request)
@@ -484,6 +497,48 @@ class JobServerState:
             if requeued:
                 self.save()
         return requeued
+
+    def requeue_jobs(self, job_ids):
+        """Force-requeue any jobs regardless of current status.
+
+        Resets each job back to 'queued', clears claim metadata and last error,
+        and appends it to the queue if not already present. Returns the list
+        of job ids that were actually requeued.
+        """
+        now = utc_now()
+        requeued = []
+        with self.lock:
+            in_queue = set(self.queue)
+            for job_id in job_ids:
+                job = self.jobs.get(job_id)
+                if not job:
+                    continue
+                claimed_by = job.get("claimed_by")
+                if claimed_by:
+                    worker = self.workers.get(claimed_by)
+                    if worker and worker.get("current_job_id") == job_id:
+                        worker["current_job_id"] = None
+                        if worker.get("status") in ("claimed", "running"):
+                            worker["status"] = "idle"
+                        worker["last_seen"] = now
+                job["status"] = "queued"
+                job["claimed_by"] = None
+                job["last_error"] = ""
+                job["updated_at"] = now
+                if job_id not in in_queue:
+                    self.queue.append(job_id)
+                    in_queue.add(job_id)
+                requeued.append(job_id)
+            if requeued:
+                self.save()
+        return requeued
+
+    def remove_jobs(self, job_ids):
+        with self.lock:
+            existing = [jid for jid in job_ids if jid in self.jobs]
+            if not existing:
+                return 0
+            return self._remove_jobs_locked(existing)
 
     def remove_job(self, job_id):
         with self.lock:
