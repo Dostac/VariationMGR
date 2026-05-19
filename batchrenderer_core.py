@@ -4,6 +4,7 @@ import uuid
 import datetime
 import importlib.util
 import job_schema as schema
+import variation_core as vcore
 
 try:
     from PySide6 import QtCore
@@ -485,27 +486,50 @@ class BatchRendererCore:
 
             self.log(f"  VariationMGR: {len(rows)} row(s), mode='{cam_mode}'")
 
-            # Build indexed rows and apply render range
+            # Build indexed rows and apply render range.
+            # Resolution order (most specific first):
+            #   1. Job's render_range_expr (preferred, new format)
+            #   2. Job's render_range dict (legacy)
+            #   3. Scene's render_range_expr (preferred, new format)
+            #   4. Scene's render_range_start/end ints (legacy)
             indexed_rows = list(enumerate(rows))
+            max_row = len(rows) + 1  # table row number of last data row
 
-            range_start = variation_data.get("render_range_start", 0)
-            range_end = variation_data.get("render_range_end", 0)
-            job_range = scene_job.get("render_range")
-            if job_range:
-                jr_s = job_range.get("start", 0)
-                jr_e = job_range.get("end", 0)
-                if jr_s > 0 or jr_e > 0:
-                    range_start = jr_s
-                    range_end = jr_e
+            range_expr = None
+            job_expr = scene_job.get("render_range_expr", "")
+            if isinstance(job_expr, str) and job_expr.strip():
+                range_expr = job_expr.strip()
+            else:
+                job_range = scene_job.get("render_range")
+                if isinstance(job_range, dict):
+                    jr_s = job_range.get("start", 0) or 0
+                    jr_e = job_range.get("end",   0) or 0
+                    if jr_s > 0 or jr_e > 0:
+                        range_expr = vcore.format_row_range_expr(jr_s, jr_e)
+                if range_expr is None:
+                    scene_expr = variation_data.get("render_range_expr", "")
+                    if isinstance(scene_expr, str) and scene_expr.strip():
+                        range_expr = scene_expr.strip()
+                if range_expr is None:
+                    sc_s = variation_data.get("render_range_start", 0) or 0
+                    sc_e = variation_data.get("render_range_end",   0) or 0
+                    if sc_s > 0 or sc_e > 0:
+                        range_expr = vcore.format_row_range_expr(sc_s, sc_e)
 
-            if range_start > 0 or range_end > 0:
-                # Convention: header = row 1, first data row = row 2.
-                sl_start = (range_start - 2) if range_start >= 2 else 0
-                sl_end = (range_end - 1) if range_end >= 2 else len(rows)
-                indexed_rows = indexed_rows[sl_start:sl_end]
-                self.log(
-                    f"  Render range: rows {range_start or 2}\u2013{range_end or (len(rows) + 1)} "
-                    f"({len(indexed_rows)} of {len(rows)})")
+            if range_expr:
+                try:
+                    row_numbers = vcore.parse_row_range_expr(range_expr, max_row=max_row)
+                except ValueError as e:
+                    self.log(f"  Warning: bad render_range_expr '{range_expr}': {e}. Rendering all rows.")
+                    row_numbers = None
+                if row_numbers:
+                    # row_numbers are table row numbers (1-based with header=1);
+                    # subtract 2 to get the index into the data rows list.
+                    wanted = {n - 2 for n in row_numbers if 2 <= n <= max_row}
+                    indexed_rows = [(i, r) for i, r in indexed_rows if i in wanted]
+                    self.log(
+                        f"  Render range: {range_expr} "
+                        f"({len(indexed_rows)} of {len(rows)})")
 
             operators = self._load_operators(variation_data)
             if variation_data.get("operators", []) and not operators:

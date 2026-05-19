@@ -6,6 +6,7 @@ import pymxs
 import qtmax
 import batchrenderer_core as brcore
 import job_schema as schema
+import variation_core as vcore
 from NetworkRender.shared import server_client
 
 
@@ -32,6 +33,8 @@ class BatchRenderDialog(QtWidgets.QDialog):
         qtmax.DisableMaxAcceleratorsOnFocus(self, True)
 
         # Each entry: {"path": str, "var_json": str, "csv_file": str, "split_size": int,
+        #              "row_range_expr": str,
+        #              # Legacy mirror for one release; written alongside row_range_expr.
         #              "row_start": int, "row_end": int}
         self.file_entries = []
         self.format_prefs = {
@@ -554,8 +557,7 @@ class BatchRenderDialog(QtWidgets.QDialog):
         var_json   = entry.get("var_json", "")
         csv_file   = entry.get("csv_file", "")
         split_size = entry.get("split_size", 0)
-        row_start  = entry.get("row_start", 0)
-        row_end    = entry.get("row_end", 0)
+        row_expr   = self._entry_row_expr(entry)
 
         # Column 1: Variation Data + range/split indicators
         if var_json:
@@ -564,10 +566,8 @@ class BatchRenderDialog(QtWidgets.QDialog):
         else:
             label = "(scene data)"
             item.setToolTip(1, "Uses VariationManagerData embedded in the .max file")
-        if row_start > 0 or row_end > 0:
-            r_s = row_start or 2
-            r_e = row_end or "end"
-            label += f" [{r_s}\u2013{r_e}]"
+        if row_expr:
+            label += f" [{row_expr}]"
         if split_size > 0:
             label += f" [\u2702 {split_size}/job]"
         item.setText(1, label)
@@ -589,7 +589,7 @@ class BatchRenderDialog(QtWidgets.QDialog):
             f = f.replace("\\", "/")
             if f not in existing_paths:
                 entry = {"path": f, "var_json": "", "csv_file": "", "split_size": 0,
-                         "row_start": 0, "row_end": 0}
+                         "row_range_expr": "", "row_start": 0, "row_end": 0}
                 self.file_entries.append(entry)
                 self.tree_widget.addTopLevelItem(self._make_tree_item(f, entry))
                 existing_paths.add(f)
@@ -767,35 +767,81 @@ class BatchRenderDialog(QtWidgets.QDialog):
             self._refresh_tree_item(self.tree_widget.topLevelItem(i), self.file_entries[i])
         self.save_ini()
 
+    def _apply_row_range(self, request, expr):
+        """Write a row-range expression into a job request, mirroring a legacy
+        start/end dict alongside it so older renderer builds still understand
+        simple ranges. Pass empty `expr` to leave the request untouched."""
+        if not expr:
+            return
+        request["render_range_expr"] = expr
+        legacy_s, legacy_e = self._expr_to_legacy_start_end(expr)
+        if legacy_s > 0 or legacy_e > 0:
+            request["render_range"] = {"start": legacy_s, "end": legacy_e}
+
+    def _entry_row_expr(self, entry):
+        """Resolve the row-range expression for a queue entry, preferring the
+        new row_range_expr field and falling back to legacy row_start/end."""
+        expr = entry.get("row_range_expr", "")
+        if isinstance(expr, str) and expr.strip():
+            return expr.strip()
+        return vcore.format_row_range_expr(
+            entry.get("row_start", 0), entry.get("row_end", 0))
+
     def _set_row_range(self):
-        """Prompt for a row range and assign it to selected queue entries."""
+        """Prompt for a row-range expression and assign it to selected entries."""
         selected_rows = self._selected_row_indices()
         if not selected_rows:
             self.log("Select one or more scenes in the queue first.")
             return
-        entry = self.file_entries[selected_rows[0]]
-        cur_start = entry.get("row_start", 0)
-        cur_end   = entry.get("row_end",   0)
-        start, ok = QtWidgets.QInputDialog.getInt(
-            self, "Row Range",
-            "Start row (header = row 1, first data row = 2, 0 = from beginning):",
-            cur_start, 0, 99999)
-        if not ok:
-            return
-        end, ok = QtWidgets.QInputDialog.getInt(
-            self, "Row Range",
-            "End row (inclusive, 0 = to end):",
-            cur_end, 0, 99999)
-        if not ok:
-            return
+        cur_expr = self._entry_row_expr(self.file_entries[selected_rows[0]])
+        while True:
+            expr, ok = QtWidgets.QInputDialog.getText(
+                self, "Row Range",
+                "Rows to render (e.g. 2,4-7,10).\n"
+                "Header is row 1; data starts at row 2.  Empty = render all rows.",
+                QtWidgets.QLineEdit.Normal, cur_expr)
+            if not ok:
+                return
+            expr = expr.strip()
+            if not vcore.is_valid_row_range_expr(expr):
+                QtWidgets.QMessageBox.warning(
+                    self, "Row Range",
+                    "Invalid expression. Use comma-separated row numbers or "
+                    "ranges, e.g. 2,4-7,10. Row 1 is the header.")
+                cur_expr = expr
+                continue
+            break
+        # Mirror to legacy fields for backwards-compat with older renderer builds.
+        legacy_start, legacy_end = self._expr_to_legacy_start_end(expr)
         for i in selected_rows:
-            self.file_entries[i]["row_start"] = start
-            self.file_entries[i]["row_end"]   = end
+            self.file_entries[i]["row_range_expr"] = expr
+            self.file_entries[i]["row_start"]      = legacy_start
+            self.file_entries[i]["row_end"]        = legacy_end
             self._refresh_tree_item(self.tree_widget.topLevelItem(i), self.file_entries[i])
-        r_s = start or 2
-        r_e = end or "end"
-        self.log(f"Row range set: {r_s}–{r_e} on {len(selected_rows)} entry(ies).")
+        self.log(
+            f"Row range set: '{expr or 'all'}' on {len(selected_rows)} entry(ies).")
         self.save_ini()
+
+    def _expr_to_legacy_start_end(self, expr):
+        """Derive (start, end) ints from an expression for legacy mirroring.
+        Only meaningful for simple shapes; complex expressions emit (0, 0)."""
+        if not expr:
+            return 0, 0
+        if "," in expr:
+            return 0, 0
+        if "-" in expr:
+            a, _, b = expr.partition("-")
+            try:
+                s = int(a.strip()) if a.strip() else 0
+                e = int(b.strip()) if b.strip() else 0
+            except ValueError:
+                return 0, 0
+            return s, e
+        try:
+            n = int(expr)
+        except ValueError:
+            return 0, 0
+        return n, n
 
     def _clear_row_range(self):
         """Clear the row range for selected queue entries."""
@@ -803,8 +849,9 @@ class BatchRenderDialog(QtWidgets.QDialog):
         if not selected_rows:
             return
         for i in selected_rows:
-            self.file_entries[i]["row_start"] = 0
-            self.file_entries[i]["row_end"]   = 0
+            self.file_entries[i]["row_range_expr"] = ""
+            self.file_entries[i]["row_start"]      = 0
+            self.file_entries[i]["row_end"]        = 0
             self._refresh_tree_item(self.tree_widget.topLevelItem(i), self.file_entries[i])
         self.save_ini()
 
@@ -870,8 +917,10 @@ class BatchRenderDialog(QtWidgets.QDialog):
             rt.setINISetting(ini, "VarJson",   f"File{i+1}", entry.get("var_json", ""))
             rt.setINISetting(ini, "CsvFile",   f"File{i+1}", entry.get("csv_file", ""))
             rt.setINISetting(ini, "SplitSize", f"File{i+1}", str(entry.get("split_size", 0)))
-            rt.setINISetting(ini, "RowStart",  f"File{i+1}", str(entry.get("row_start", 0)))
-            rt.setINISetting(ini, "RowEnd",    f"File{i+1}", str(entry.get("row_end",   0)))
+            rt.setINISetting(ini, "RowRangeExpr", f"File{i+1}", entry.get("row_range_expr", ""))
+            # Legacy mirror kept for one release; remove once all clients understand RowRangeExpr.
+            rt.setINISetting(ini, "RowStart",     f"File{i+1}", str(entry.get("row_start", 0)))
+            rt.setINISetting(ini, "RowEnd",       f"File{i+1}", str(entry.get("row_end",   0)))
 
     def load_ini(self):
         self.file_entries = []
@@ -939,10 +988,16 @@ class BatchRenderDialog(QtWidgets.QDialog):
                 var_json   = rt.getINISetting(ini, "VarJson",   f"File{i}") or ""
                 csv_file   = rt.getINISetting(ini, "CsvFile",   f"File{i}") or ""
                 split_size = _int("SplitSize", f"File{i}", 0)
+                row_expr   = rt.getINISetting(ini, "RowRangeExpr", f"File{i}") or ""
                 row_start  = _int("RowStart",  f"File{i}", 0)
                 row_end    = _int("RowEnd",    f"File{i}", 0)
+                # Migrate forward: if the INI predates RowRangeExpr, synthesise one
+                # from the legacy ints.
+                if not row_expr and (row_start > 0 or row_end > 0):
+                    row_expr = vcore.format_row_range_expr(row_start, row_end)
                 entry = {"path": f, "var_json": var_json, "csv_file": csv_file,
-                         "split_size": split_size, "row_start": row_start, "row_end": row_end}
+                         "split_size": split_size, "row_range_expr": row_expr,
+                         "row_start": row_start, "row_end": row_end}
                 self.file_entries.append(entry)
                 self.tree_widget.addTopLevelItem(self._make_tree_item(f, entry))
 
@@ -1089,8 +1144,7 @@ class BatchRenderDialog(QtWidgets.QDialog):
             path      = entry["path"]
             var_json  = entry.get("var_json", "")
             csv_file  = entry.get("csv_file", "")
-            row_start = entry.get("row_start", 0)
-            row_end   = entry.get("row_end",   0)
+            row_expr  = self._entry_row_expr(entry)
             request   = self.build_job_request([path], load_scene=load_scene)
             if var_json:
                 override = self._load_variation_override(var_json, os.path.basename(path))
@@ -1100,8 +1154,7 @@ class BatchRenderDialog(QtWidgets.QDialog):
                 csv_data = self._load_csv_override(csv_file, os.path.basename(path))
                 if csv_data is not None:
                     request["csv_override"] = csv_data
-            if row_start > 0 or row_end > 0:
-                request["render_range"] = {"start": row_start, "end": row_end}
+            self._apply_row_range(request, row_expr)
             all_jobs.extend(schema.build_scene_jobs(request))
         return all_jobs
 
@@ -1260,7 +1313,7 @@ class BatchRenderDialog(QtWidgets.QDialog):
         if not scene_path.strip("/") or not os.path.isfile(scene_path):
             return []
         return [{"path": scene_path, "var_json": "", "csv_file": "", "split_size": 0,
-                 "row_start": 0, "row_end": 0}]
+                 "row_range_expr": "", "row_start": 0, "row_end": 0}]
 
     def discover_server(self):
         self.log("Discovering server on local network...")
@@ -1294,10 +1347,8 @@ class BatchRenderDialog(QtWidgets.QDialog):
                 if csv_data is not None:
                     request["csv_override"] = csv_data
 
-            row_start = entry.get("row_start", 0)
-            row_end   = entry.get("row_end",   0)
-            if row_start > 0 or row_end > 0:
-                request["render_range"] = {"start": row_start, "end": row_end}
+            row_expr = self._entry_row_expr(entry)
+            self._apply_row_range(request, row_expr)
 
             split_size = entry.get("split_size", 0)
             if split_size > 0:
@@ -1305,11 +1356,14 @@ class BatchRenderDialog(QtWidgets.QDialog):
                 if row_count > 0:
                     num_chunks = math.ceil(row_count / split_size)
                     for chunk_idx in range(num_chunks):
+                        # Chunk boundaries are simple table-row ranges; emit as expr
+                        # and as the legacy dict so older renderers still slice.
                         chunk_start = chunk_idx * split_size + 2
                         chunk_end   = min((chunk_idx + 1) * split_size + 1, row_count + 1)
                         chunk_req   = copy.deepcopy(request)
-                        chunk_req["render_range"] = {"start": chunk_start, "end": chunk_end}
-                        chunk_req["request_id"]   = ""
+                        chunk_req["render_range_expr"] = f"{chunk_start}-{chunk_end}"
+                        chunk_req["render_range"]      = {"start": chunk_start, "end": chunk_end}
+                        chunk_req["request_id"]        = ""
                         out.append((f"{basename}  (chunk {chunk_idx+1}/{num_chunks})", chunk_req))
                     continue
 
@@ -1439,10 +1493,8 @@ class BatchRenderDialog(QtWidgets.QDialog):
                 if csv_data is not None:
                     request["csv_override"] = csv_data
 
-            row_start = entry.get("row_start", 0)
-            row_end   = entry.get("row_end",   0)
-            if row_start > 0 or row_end > 0:
-                request["render_range"] = {"start": row_start, "end": row_end}
+            row_expr = self._entry_row_expr(entry)
+            self._apply_row_range(request, row_expr)
 
             split_size = entry.get("split_size", 0)
             if split_size > 0:
@@ -1455,7 +1507,8 @@ class BatchRenderDialog(QtWidgets.QDialog):
                         chunk_start = chunk_idx * split_size + 2
                         chunk_end = min((chunk_idx + 1) * split_size + 1, row_count + 1)
                         chunk_req = copy.deepcopy(request)
-                        chunk_req["render_range"] = {"start": chunk_start, "end": chunk_end}
+                        chunk_req["render_range_expr"] = f"{chunk_start}-{chunk_end}"
+                        chunk_req["render_range"]      = {"start": chunk_start, "end": chunk_end}
                         chunk_req["request_id"] = ""
                         try:
                             response = server_client.submit_job(server_url, chunk_req)
@@ -1489,7 +1542,7 @@ class BatchRenderDialog(QtWidgets.QDialog):
     # Compatibility: keeps old internal call sites functional.
     def _render_files(self, file_list, load_files=True):
         entries = [{"path": p, "var_json": "", "csv_file": "", "split_size": 0,
-                    "row_start": 0, "row_end": 0} for p in file_list]
+                    "row_range_expr": "", "row_start": 0, "row_end": 0} for p in file_list]
         scene_jobs = self._collect_scene_jobs(entries, load_scene=load_files)
         self._run_scene_jobs(scene_jobs)
 

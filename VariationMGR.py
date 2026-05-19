@@ -54,8 +54,9 @@ class VariationManager(QtWidgets.QDialog):
         self.active_ops_instances = []
         self.render_camera_mode = "active"   # "active" | "column"
         self.render_camera_column = ""
-        self.render_range_start = 0   # 0 = from beginning
-        self.render_range_end = 0     # 0 = to end
+        # Row-range expression, e.g. "2,4-7,10". Empty string = all rows.
+        # Numbers refer to table row numbers (header = row 1, data starts at 2).
+        self.render_range_expr = ""
         self._csv_watcher = None
         self._csv_temp_path = None
 
@@ -203,27 +204,22 @@ class VariationManager(QtWidgets.QDialog):
         cam_vbox.addWidget(sep_render)
         cam_vbox.addSpacing(4)
 
-        cam_vbox.addWidget(QLabel("Row Range (0 = all, header = row 1, data starts at row 2):"))
+        cam_vbox.addWidget(QLabel("Row Range (empty = all, header = row 1, data starts at row 2):"))
         range_row = QHBoxLayout()
         range_row.setSpacing(8)
-        range_row.addWidget(QLabel("From:"))
-        self.spn_range_start = QtWidgets.QSpinBox()
-        self.spn_range_start.setRange(0, 99999)
-        self.spn_range_start.setSpecialValueText("all")
-        self.spn_range_start.setValue(0)
-        self.spn_range_start.setMinimumHeight(32)
-        self.spn_range_start.setFixedWidth(80)
-        range_row.addWidget(self.spn_range_start)
-        range_row.addWidget(QLabel("To:"))
-        self.spn_range_end = QtWidgets.QSpinBox()
-        self.spn_range_end.setRange(0, 99999)
-        self.spn_range_end.setSpecialValueText("all")
-        self.spn_range_end.setValue(0)
-        self.spn_range_end.setMinimumHeight(32)
-        self.spn_range_end.setFixedWidth(80)
-        range_row.addWidget(self.spn_range_end)
-        range_row.addStretch()
+        self.edt_row_range = QLineEdit()
+        self.edt_row_range.setPlaceholderText("e.g. 2,4-7,10  (empty = all)")
+        self.edt_row_range.setMinimumHeight(32)
+        self.edt_row_range.setToolTip(
+            "Comma-separated table row numbers and ranges. Row 1 is the header.\n"
+            "Examples:  2-10  |  2,4-7,10  |  6,12  |  5-\n"
+            "Leave empty to render all rows."
+        )
+        range_row.addWidget(self.edt_row_range, stretch=1)
         cam_vbox.addLayout(range_row)
+        self.lbl_row_range_status = QLabel("")
+        self.lbl_row_range_status.setWordWrap(True)
+        cam_vbox.addWidget(self.lbl_row_range_status)
 
         top_layout.addWidget(naming_group, stretch=2)
         top_layout.addWidget(cam_group, stretch=1)
@@ -350,10 +346,7 @@ class VariationManager(QtWidgets.QDialog):
         self.radio_cam_column.toggled.connect(lambda c: self._on_cam_mode_toggled("column", c))
         self.radio_cam_all.toggled.connect(lambda c: self._on_cam_mode_toggled("all", c))
         self.combo_cam_column.currentTextChanged.connect(lambda t: setattr(self, 'render_camera_column', t))
-        self.spn_range_start.valueChanged.connect(lambda v: setattr(self, 'render_range_start', v))
-        self.spn_range_end.valueChanged.connect(lambda v: setattr(self, 'render_range_end', v))
-        self.spn_range_start.editingFinished.connect(self._clamp_range_start)
-        self.spn_range_end.editingFinished.connect(self._clamp_range_end)
+        self.edt_row_range.textChanged.connect(self._on_row_range_text)
         self.columns_changed.connect(self._on_cam_columns_changed)
 
     def _disable_combo_wheel(self, root):
@@ -579,12 +572,17 @@ class VariationManager(QtWidgets.QDialog):
                 "ops_folder": self.ops_folder,
             })
 
+        # Emit both render_range_expr (preferred, current format) and the legacy
+        # render_range_start/end ints derived from it, so old build of the
+        # renderer can still read a saved scene during the rollout period.
+        legacy_start, legacy_end = self._expr_to_legacy_start_end(self.render_range_expr)
         return {
             "scheme": self.edt_pattern.text(),
             "render_camera_mode": self.render_camera_mode,
             "render_camera_column": self.render_camera_column,
-            "render_range_start": self.render_range_start,
-            "render_range_end": self.render_range_end,
+            "render_range_expr": self.render_range_expr,
+            "render_range_start": legacy_start,
+            "render_range_end": legacy_end,
             "ops_folder": self.ops_folder,
             "headers": headers,
             "rows": rows,
@@ -630,10 +628,7 @@ class VariationManager(QtWidgets.QDialog):
                     else:
                         self.radio_cam_active.setChecked(True)
 
-                    self.render_range_start = data.get("render_range_start", 0)
-                    self.render_range_end = data.get("render_range_end", 0)
-                    self.spn_range_start.setValue(self.render_range_start)
-                    self.spn_range_end.setValue(self.render_range_end)
+                    self._restore_row_range(data)
 
                     headers = data.get("headers", [])
                     self.table.setColumnCount(len(headers))
@@ -806,13 +801,62 @@ class VariationManager(QtWidgets.QDialog):
         for i in range(self.table.rowCount()):
             self.table.setVerticalHeaderItem(i, QTableWidgetItem(str(i + 2)))
 
-    def _clamp_range_start(self):
-        if self.spn_range_start.value() == 1:
-            self.spn_range_start.setValue(2)
+    def _on_row_range_text(self, text):
+        """Live-validate the row-range expression. Stores the text either way so
+        autosave persists the in-progress edit; only the status label changes."""
+        self.render_range_expr = text.strip()
+        if not self.render_range_expr:
+            self.lbl_row_range_status.setText("")
+            return
+        if vcore.is_valid_row_range_expr(self.render_range_expr):
+            self.lbl_row_range_status.setStyleSheet("color: #66ff66;")
+            self.lbl_row_range_status.setText("✓ valid expression")
+        else:
+            self.lbl_row_range_status.setStyleSheet("color: #ff6666;")
+            self.lbl_row_range_status.setText(
+                "✗ invalid — use e.g. 2,4-7,10 (row 1 is header)")
 
-    def _clamp_range_end(self):
-        if self.spn_range_end.value() == 1:
-            self.spn_range_end.setValue(2)
+    def _restore_row_range(self, data):
+        """Restore render_range_expr from scene/config data, falling back to
+        the legacy render_range_start/end ints when the new field is absent."""
+        expr = data.get("render_range_expr", None)
+        if not isinstance(expr, str) or not expr.strip():
+            legacy_start = data.get("render_range_start", 0)
+            legacy_end   = data.get("render_range_end",   0)
+            expr = vcore.format_row_range_expr(legacy_start, legacy_end)
+        self.render_range_expr = expr or ""
+        # blockSignals so the textChanged handler doesn't overwrite the
+        # status label with a transient state during programmatic set.
+        self.edt_row_range.blockSignals(True)
+        self.edt_row_range.setText(self.render_range_expr)
+        self.edt_row_range.blockSignals(False)
+        self._on_row_range_text(self.render_range_expr)
+
+    def _expr_to_legacy_start_end(self, expr):
+        """Derive (start, end) ints from an expression for backwards-compat
+        emission. Only meaningful for simple ranges ('N', 'N-M', 'N-', '-M').
+        Anything more complex (commas, multi-range) returns (0, 0) — old
+        consumers will fall back to rendering all rows."""
+        if not expr:
+            return 0, 0
+        expr = expr.strip()
+        if "," in expr:
+            return 0, 0
+        if "-" in expr:
+            a, _, b = expr.partition("-")
+            a = a.strip()
+            b = b.strip()
+            try:
+                start = int(a) if a else 0
+                end = int(b) if b else 0
+            except ValueError:
+                return 0, 0
+            return start, end
+        try:
+            n = int(expr)
+        except ValueError:
+            return 0, 0
+        return n, n
 
     def add_row(self):
         self.table.insertRow(self.table.rowCount())
@@ -1231,10 +1275,7 @@ class VariationManager(QtWidgets.QDialog):
         else:
             self.radio_cam_active.setChecked(True)
 
-        self.render_range_start = data.get("render_range_start", 0)
-        self.render_range_end = data.get("render_range_end", 0)
-        self.spn_range_start.setValue(self.render_range_start)
-        self.spn_range_end.setValue(self.render_range_end)
+        self._restore_row_range(data)
 
         headers = data.get("headers", [])
         self.table.setColumnCount(len(headers))

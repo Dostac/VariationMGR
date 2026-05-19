@@ -37,7 +37,11 @@ _DEFAULT_JOB_REQUEST = {
     },
     "variation_override": None,  # Optional: full VariationManagerData dict
     "csv_override": None,        # Optional: {"headers": [...], "rows": [[...], ...]}
-    "render_range": None,        # Optional: {"start": int, "end": int} (1-based inclusive)
+    "render_range": None,        # Legacy: {"start": int, "end": int} (1-based inclusive).
+                                 # Still accepted; new clients should send render_range_expr.
+    "render_range_expr": "",     # Preferred: expression like "2,4-7,10" referring to table
+                                 # row numbers (header = row 1, data starts at row 2).
+                                 # Empty string = render all rows.
 }
 
 
@@ -209,6 +213,10 @@ def normalize_job_request(job_request):
         rr_end = _int(rr.get("end", 0), 0)
         if rr_start > 0 or rr_end > 0:
             out["render_range"] = {"start": rr_start, "end": rr_end}
+
+    expr = job_request.get("render_range_expr", "")
+    if isinstance(expr, str) and expr.strip():
+        out["render_range_expr"] = expr.strip()
 
     if output["format"] not in ("jpg", "png", "tif", "exr"):
         output["format"] = "jpg"
