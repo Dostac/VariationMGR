@@ -742,20 +742,85 @@ tbody tr:hover td { background: var(--bg-hover); }
 tbody tr:last-child td { border-bottom: none; }
 tbody .empty { color: var(--text-muted); text-align: center; padding: 20px; }
 
-.col-check {
-  width: 30px;
+.col-grip {
+  width: 26px;
   padding-left: 9px;
   padding-right: 2px;
+  white-space: nowrap;
 }
 
-.col-check input[type="checkbox"] {
-  accent-color: var(--blue);
-  width: 13px;
-  height: 13px;
-  margin: 0;
+/* Rows are click-selectable (click / Ctrl+click / Shift+click). */
+.t-jobs { user-select: none; }
+.t-jobs tbody tr[data-job-id] { cursor: pointer; }
+
+tbody tr.selected td { background: rgba(121,192,255,0.12); }
+tbody tr.selected:hover td { background: rgba(121,192,255,0.16); }
+
+/* Output cell: truncated path + copy-to-clipboard button */
+.col-output .out-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
 }
 
-tbody tr.selected td { background: rgba(121,192,255,0.07); }
+.col-output .out-path {
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.copy-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 0.1s, border-color 0.1s, color 0.1s;
+}
+
+.copy-btn:hover {
+  background: var(--bg-card);
+  border-color: var(--border-hi);
+  color: var(--text);
+}
+
+/* Queue drag-reorder (Queued tab) */
+.drag-grip {
+  display: inline-flex;
+  align-items: center;
+  vertical-align: middle;
+  margin-right: 5px;
+  color: var(--text-dim);
+  cursor: grab;
+}
+
+.draggable-row:hover .drag-grip { color: var(--text-muted); }
+.draggable-row.dragging { opacity: 0.45; }
+.draggable-row.dragging .drag-grip { cursor: grabbing; }
+
+/* Insertion indicator: a blue line spanning the row at the drop edge. */
+.draggable-row.drop-before td { box-shadow: inset 0 2px 0 0 var(--blue); }
+.draggable-row.drop-after td  { box-shadow: inset 0 -2px 0 0 var(--blue); }
+
+/* Frozen jobs: queued but held until unfrozen. The status chip becomes FROZEN. */
+.chip.frozen {
+  gap: 3px;
+  color: #9fd8ff;
+  background: rgba(121, 192, 255, 0.12);
+  border-color: rgba(121, 192, 255, 0.55);
+}
+
+.frozen-row td { background: rgba(121, 192, 255, 0.045); }
+.frozen-row:hover td { background: rgba(121, 192, 255, 0.09); }
 
 /* worker color dot + name inline */
 .worker-cell {

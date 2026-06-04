@@ -27,7 +27,6 @@ from NetworkRender.server.server_dashboard import read_js, read_stylesheet, rend
 
 DISCOVERY_MAGIC = "VB_BATCH_DISCOVER_V1"
 MAX_REQUEST_BODY_BYTES = 10 * 1024 * 1024
-DEFAULT_STALE_REQUEUE_SECONDS = 900
 
 # Required on every mutating /admin/* request. Browsers cannot send custom
 # headers cross-origin without a CORS preflight, and we never send the
@@ -381,20 +380,32 @@ class JobServerState:
                 self.save()
                 return None, None
 
-            while self.queue:
-                job_id = self.queue.popleft()
+            # Scan for the first claimable job. Unlike a plain popleft loop we
+            # must NOT discard frozen jobs: they stay queued at their position
+            # and are simply skipped until unfrozen. Genuinely-stale ids
+            # (missing job, or no longer queued) are pruned as we go.
+            claim_id = None
+            kept = deque()
+            for job_id in self.queue:
                 job = self.jobs.get(job_id)
-                if not job:
+                is_queued = bool(job) and job.get("status") == "queued"
+                if not is_queued:
+                    continue  # stale/missing → drop from queue
+                if claim_id is None and not job.get("frozen"):
+                    claim_id = job_id  # first eligible job; claimed below, not kept
                     continue
-                if job.get("status") != "queued":
-                    continue
+                kept.append(job_id)   # frozen, or queued jobs after the claimed one
+            self.queue = kept
+
+            if claim_id is not None:
+                job = self.jobs[claim_id]
                 job["status"] = "claimed"
                 job["claimed_by"] = worker_id
                 job["claimed_by_host"] = worker.get("host", "")
                 job["updated_at"] = now
                 job["attempts"] = int(job.get("attempts", 0)) + 1
                 worker["status"] = "claimed"
-                worker["current_job_id"] = job_id
+                worker["current_job_id"] = claim_id
                 worker["last_seen"] = now
                 self.save()
                 return job, None
@@ -482,30 +493,6 @@ class JobServerState:
             out.sort(key=lambda x: (x.get("worker_name", ""), x.get("worker_id", "")))
             return out
 
-    def requeue_stale_claims(self, stale_seconds):
-        now = utc_now()
-        requeued = []
-        with self.lock:
-            in_queue = set(self.queue)
-            for job_id, job in self.jobs.items():
-                if job.get("status") not in ("claimed", "running"):
-                    continue
-                last = job.get("updated_at", 0)
-                if (now - last) < stale_seconds:
-                    continue
-                job["status"] = "queued"
-                job["claimed_by"] = None
-                job["updated_at"] = now
-                job["started_at"] = 0
-                job["finished_at"] = 0
-                if job_id not in in_queue:
-                    self.queue.append(job_id)
-                    in_queue.add(job_id)
-                requeued.append(job_id)
-            if requeued:
-                self.save()
-        return requeued
-
     def requeue_failed_jobs(self, max_attempts=2):
         """Requeue failed jobs that have been attempted fewer than max_attempts times."""
         now = utc_now()
@@ -556,6 +543,7 @@ class JobServerState:
                 job["status"] = "queued"
                 job["claimed_by"] = None
                 job["last_error"] = ""
+                job["frozen"] = False  # an explicit requeue should run, not stay held
                 job["updated_at"] = now
                 job["started_at"] = 0
                 job["finished_at"] = 0
@@ -614,6 +602,63 @@ class JobServerState:
 
             self.save()
             return len(queued_ids)
+
+    def get_queue_order(self):
+        """Return the current queue as an ordered list of job ids (claim order)."""
+        with self.lock:
+            return list(self.queue)
+
+    def reorder_queue(self, ordered_job_ids):
+        """Reorder the pending queue to match *ordered_job_ids*.
+
+        Defensive against races with worker claims happening between the moment
+        the client rendered the list and the moment it dropped:
+        - ids that are no longer queued (claimed/removed meanwhile) are ignored;
+        - unknown ids are ignored;
+        - any job still queued but missing from the request keeps its relative
+          order and is appended after the requested ones (e.g. a job enqueued
+          after the client loaded the page).
+        """
+        with self.lock:
+            current = list(self.queue)
+            current_set = set(current)
+            seen = set()
+            desired = []
+            for jid in ordered_job_ids:
+                jid = str(jid)
+                if jid in current_set and jid not in seen:
+                    desired.append(jid)
+                    seen.add(jid)
+            remainder = [jid for jid in current if jid not in seen]
+            new_order = desired + remainder
+            if new_order != current:
+                self.queue = deque(new_order)
+                self.save()
+            return list(self.queue)
+
+    def set_jobs_frozen(self, job_ids, frozen):
+        """Freeze or unfreeze queued jobs.
+
+        A frozen job stays in the queue at its position but is skipped by
+        claim_job until unfrozen. Only jobs currently in the 'queued' state can
+        be (un)frozen; other states are ignored. Returns the ids changed.
+        """
+        frozen = bool(frozen)
+        changed = []
+        with self.lock:
+            wanted = {str(j) for j in job_ids}
+            for job_id in wanted:
+                job = self.jobs.get(job_id)
+                if not job or job.get("status") != "queued":
+                    continue
+                if bool(job.get("frozen")) == frozen:
+                    continue
+                job["frozen"] = frozen
+                job["updated_at"] = utc_now()
+                changed.append(job_id)
+            if changed:
+                self.save()
+        return changed
 
     def remove_jobs_by_status(self, statuses):
         with self.lock:
@@ -730,6 +775,9 @@ def build_dashboard_payload(server):
 
     workers_by_id = {str(w.get("worker_id", "")): w for w in workers}
     jobs_by_id = {str(j.get("job_id", "")): j for j in jobs}
+    # Position of each job in the pending queue (claim order). Used by the
+    # dashboard to show queued jobs in true run order and to drive drag-reorder.
+    queue_pos = {str(jid): idx for idx, jid in enumerate(state.get_queue_order())}
 
     # We display the worker's hostname everywhere on the dashboard. The
     # internal worker_name carries an id suffix (for log disambiguation) that
@@ -793,6 +841,8 @@ def build_dashboard_payload(server):
             "duration_seconds": duration,
             "updated_at_ts": j.get("updated_at") or 0,
             "last_error": j.get("last_error", "") or "",
+            "queue_position": queue_pos.get(str(j.get("job_id", ""))),
+            "frozen": bool(j.get("frozen")),
         })
 
     # Rolling average over the most recent N completed jobs. Using the most
@@ -805,6 +855,13 @@ def build_dashboard_payload(server):
         avg_duration = sum(d for _, d in recent) / len(recent)
 
     queued_count = stats.get("by_status", {}).get("queued", 0)
+    # Frozen jobs are still 'queued' but won't be claimed until unfrozen, so
+    # they're not pending work for ETA purposes.
+    frozen_count = sum(
+        1 for j in jobs
+        if j.get("frozen") and str(j.get("status", "") or "").lower() == "queued"
+    )
+    pending_count = max(0, queued_count - frozen_count)
     running_count = (
         stats.get("by_status", {}).get("running", 0)
         + stats.get("by_status", {}).get("claimed", 0)
@@ -814,7 +871,7 @@ def build_dashboard_payload(server):
     if avg_duration > 0 and active_worker_count > 0 and not state.is_queue_paused():
         # Running jobs count as one full average each (we don't know their
         # remaining time). Conservative; gets better as more jobs finish.
-        eta_seconds = ((queued_count + running_count) * avg_duration) / active_worker_count
+        eta_seconds = ((pending_count + running_count) * avg_duration) / active_worker_count
 
     host, port = server.server_address[0], server.server_address[1]
     return {
@@ -829,6 +886,7 @@ def build_dashboard_payload(server):
         "auto_requeue_failed": state.is_auto_requeue_failed(),
         "avg_duration_seconds": avg_duration,
         "eta_seconds": eta_seconds,
+        "frozen_count": frozen_count,
         "workers": worker_rows,
         "jobs": job_rows,
     }
@@ -1084,16 +1142,19 @@ class RequestHandler(BaseHTTPRequestHandler):
                 return
             payload_dict = payload if isinstance(payload, dict) else {}
 
-            if path == "/admin/requeue_stale":
-                stale_seconds = int(payload_dict.get("stale_seconds", DEFAULT_STALE_REQUEUE_SECONDS))
-                requeued = self.server.state.requeue_stale_claims(stale_seconds)
-                self._json(HTTPStatus.OK, {"requeued": requeued, "count": len(requeued)})
-                return
-
             if path == "/admin/queue/pause":
                 paused = bool(payload_dict.get("paused", False))
                 self.server.state.set_queue_paused(paused)
                 self._json(HTTPStatus.OK, {"queue_paused": paused})
+                return
+
+            if path == "/admin/queue/reorder":
+                job_ids = payload_dict.get("job_ids") or []
+                if not isinstance(job_ids, list):
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "job_ids must be a list"})
+                    return
+                order = self.server.state.reorder_queue([str(j) for j in job_ids])
+                self._json(HTTPStatus.OK, {"queue": order, "count": len(order)})
                 return
 
             if path == "/admin/auto_requeue":
@@ -1109,6 +1170,16 @@ class RequestHandler(BaseHTTPRequestHandler):
                     return
                 requeued = self.server.state.requeue_jobs([str(j) for j in job_ids])
                 self._json(HTTPStatus.OK, {"requeued": requeued, "count": len(requeued)})
+                return
+
+            if path == "/admin/jobs/freeze":
+                job_ids = payload_dict.get("job_ids") or []
+                if not isinstance(job_ids, list):
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "job_ids must be a list"})
+                    return
+                frozen = bool(payload_dict.get("frozen", True))
+                changed = self.server.state.set_jobs_frozen([str(j) for j in job_ids], frozen)
+                self._json(HTTPStatus.OK, {"changed": changed, "count": len(changed), "frozen": frozen})
                 return
 
             if path == "/admin/jobs/remove":
@@ -1252,6 +1323,44 @@ def run_server(host, port, state_file, local_only=True, enable_discovery=True):
     print("Server stopped.")
 
 
+def run_server_window(host, port, state_file, local_only=True, enable_discovery=True):
+    """Run the server headless and present the web dashboard in a native window.
+
+    The desktop "UI" is just the same browser dashboard wrapped in a pywebview
+    shell (Edge WebView2 on Windows), so there is a single UI to maintain. If
+    pywebview is unavailable we fall back to running headless rather than failing.
+    """
+    try:
+        import webview
+    except ImportError:
+        print("pywebview is not installed; running headless instead.")
+        print("Install it with:  pip install pywebview")
+        run_server(host, port, state_file, local_only, enable_discovery)
+        return
+
+    runtime = ServerRuntime(
+        host=host,
+        port=port,
+        state_file=state_file,
+        local_only=local_only,
+        enable_discovery=enable_discovery,
+    )
+    runtime.start()
+    # The browser can't reach a 0.0.0.0/:: bind directly; point the window at
+    # loopback while the server still listens on the configured interface.
+    ui_host = "127.0.0.1" if host in ("0.0.0.0", "::", "") else host
+    url = f"http://{ui_host}:{port}/"
+    print(f"VB Batch Server listening on http://{host}:{port}")
+    print(f"State file: {os.path.abspath(state_file)}")
+    print(f"Opening dashboard window at {url}")
+    try:
+        webview.create_window("VB Render Server", url, width=1320, height=900)
+        webview.start()  # blocks on the GUI loop until the window is closed
+    finally:
+        runtime.stop()
+        print("Server stopped.")
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="VirtualBuilders Batch Render Server")
     parser.add_argument("--host", default="0.0.0.0", help="Bind host (default: 0.0.0.0)")
@@ -1274,7 +1383,7 @@ def parse_args():
     parser.add_argument(
         "--ui",
         action="store_true",
-        help="Launch server with desktop UI dashboard.",
+        help="Open the web dashboard in a native window (pywebview) alongside the server.",
     )
     return parser.parse_args()
 
@@ -1282,9 +1391,7 @@ def parse_args():
 def main():
     args = parse_args()
     if args.ui:
-        from NetworkRender.server import server_ui
-
-        server_ui.run_server_ui(
+        run_server_window(
             host=args.host,
             port=args.port,
             state_file=args.state_file,

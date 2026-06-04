@@ -60,8 +60,8 @@ Operators live under `Operators/` and must implement `get_ui()`, `execute(row_da
 
 ## Network Render Domain
 
-- `NetworkRender/server/server.py` runs a threaded HTTP job server with persisted queue state and worker lifecycle endpoints. Supports `--ui` flag for desktop dashboard mode.
-- `NetworkRender/server/server_ui.py` is a desktop dashboard for workers/jobs, queue pause, stale requeue, and cleanup actions.
+- `NetworkRender/server/server.py` runs a threaded HTTP job server with persisted queue state and worker lifecycle endpoints. It also serves the web dashboard; `--ui` wraps that same dashboard in a native pywebview window (no separate desktop UI).
+- `NetworkRender/server/server_dashboard.*` is the web dashboard (HTML/CSS/JS) for workers/jobs, queue pause, and cleanup actions — the single UI for the server.
 - `NetworkRender/worker/worker.py` runs a worker loop with discovery, registration, heartbeat, claim, execute, and status updates. Supports `--ui` flag for dashboard mode.
 - `NetworkRender/worker/networkrender.py` executes one scene job inside 3ds Max batch runtime.
 - `NetworkRender/worker/worker_ui.py` is a dashboard for worker status/logs and duplicate-worker cleanup.

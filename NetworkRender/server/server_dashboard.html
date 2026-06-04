@@ -155,6 +155,8 @@
       <!-- Action buttons row -->
       <div class="jobs-actions" style="margin-bottom:10px">
         <button class="btn" id="btn-requeue-sel" disabled>Requeue Selected</button>
+        <button class="btn" id="btn-freeze-sel" disabled>Freeze Selected</button>
+        <button class="btn" id="btn-unfreeze-sel" disabled>Unfreeze Selected</button>
         <button class="btn btn-danger" id="btn-remove-sel" disabled>Remove Selected</button>
         <span class="sep"></span>
         <button class="btn" id="btn-clear-queue">Clear Queue</button>
@@ -166,7 +168,7 @@
       <table class="t-jobs">
         <thead>
           <tr>
-            <th class="col-check"><input type="checkbox" id="chk-all"></th>
+            <th class="col-grip"></th>
             <th>Scene</th>
             <th>Output</th>
             <th>Status</th>
