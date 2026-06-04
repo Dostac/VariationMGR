@@ -16,6 +16,16 @@ rt = pymxs.runtime
 # Shared job contract lives in job_schema.
 
 
+class _NoWheelFilter(QtCore.QObject):
+    """Swallows wheel events so a widget doesn't scrub its value when the user
+    is trying to scroll the surrounding panel. Installed on combo and spin boxes."""
+    def eventFilter(self, obj, event):
+        if event.type() == QtCore.QEvent.Type.Wheel:
+            event.ignore()
+            return True
+        return False
+
+
 # =============================================================================
 # MAIN DIALOG
 # =============================================================================
@@ -31,6 +41,8 @@ class BatchRenderDialog(QtWidgets.QDialog):
         self.setWindowFlags(QtCore.Qt.WindowType.Tool)
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
         qtmax.DisableMaxAcceleratorsOnFocus(self, True)
+
+        self._no_wheel_filter = _NoWheelFilter(self)
 
         # Each entry: {"path": str, "var_json": str, "csv_file": str, "split_size": int,
         #              "row_range_expr": str,
@@ -372,11 +384,26 @@ class BatchRenderDialog(QtWidgets.QDialog):
         self._setup_autosave()
         self.log(f"Config: {self.get_ini_path()}")
         self.log("Ready.")
+        self._disable_combo_wheel(self)
         self._is_initializing = False
 
     # -----------------------------------------------------------------------
     # SMALL HELPERS
     # -----------------------------------------------------------------------
+
+    def _disable_combo_wheel(self, root):
+        """Install the no-wheel filter on every QComboBox and spin box under
+        `root` so scrolling the panel doesn't scrub their values. Idempotent:
+        each widget is marked so re-running on freshly-added widgets is safe."""
+        if root is None:
+            return
+        marker = "_br_no_wheel_installed"
+        for widget in (root.findChildren(QtWidgets.QComboBox)
+                       + root.findChildren(QtWidgets.QAbstractSpinBox)):
+            if widget.property(marker):
+                continue
+            widget.installEventFilter(self._no_wheel_filter)
+            widget.setProperty(marker, True)
 
     def _wide_combo(self):
         c = QtWidgets.QComboBox()
@@ -1405,6 +1432,7 @@ class BatchRenderDialog(QtWidgets.QDialog):
         cmb_fmt.addItems(["JSON", "PowerShell"])
         hdr.addWidget(cmb_fmt)
         root.addLayout(hdr)
+        self._disable_combo_wheel(dlg)
 
         lbl_url = QtWidgets.QLabel(f"POST  {submit_url}")
         lbl_url.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
