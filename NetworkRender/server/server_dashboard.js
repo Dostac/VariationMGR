@@ -396,15 +396,6 @@ function renderStatStrip(filteredJobs) {
 
 // ── SVG chart helpers ─────────────────────────────────────────────────────────
 
-function describeArc(cx, cy, r, startAngle, endAngle) {
-  const rad = (a) => (a - 90) * Math.PI / 180;
-  const x1 = cx + r * Math.cos(rad(startAngle));
-  const y1 = cy + r * Math.sin(rad(startAngle));
-  const x2 = cx + r * Math.cos(rad(endAngle));
-  const y2 = cy + r * Math.sin(rad(endAngle));
-  return `M ${x1} ${y1} A ${r} ${r} 0 ${(endAngle-startAngle)>180?1:0} 1 ${x2} ${y2}`;
-}
-
 // ── Pie / donut ───────────────────────────────────────────────────────────────
 
 function renderPieChart(el, filteredJobs) {
@@ -422,24 +413,26 @@ function renderPieChart(el, filteredJobs) {
 
   const W = 240, H = 180;
   const cx = 80, cy = 82, rO = 60, rI = 34;
-  const gapDeg = 2;
+  const r  = (rO + rI) / 2;          // stroke centerline radius
+  const sw = rO - rI;                // ring thickness
+  const C  = 2 * Math.PI * r;        // circumference
+  const gapLen = workers.length > 1 ? 2 : 0;  // gap between segments, in path units
 
-  let angle = 0;
+  // Each segment is a stroked circle: draw `frac` of the circumference,
+  // rotated to its start angle. No arc-flag math, so it can't fold over.
+  let acc = 0;                       // accumulated fraction (0..1)
   const arcs = workers.map((name) => {
     const frac  = byWorker[name] / total;
-    const sweep = frac * 360 - gapDeg;
-    const start = angle;
-    const end   = angle + sweep;
-    angle += frac * 360;
-    return { name, count: byWorker[name], frac, start, end };
+    const start = acc;
+    acc += frac;
+    return { name, count: byWorker[name], frac, start };
   });
 
-  const paths = arcs.map(({ name, start, end }) => {
-    const col = colorForWorker(name);
-    const d1  = describeArc(cx, cy, rO, start, end);
-    const d2  = describeArc(cx, cy, rI, end, start);
-    const eRad = (end - 90) * Math.PI / 180;
-    return `<path d="${d1} L ${cx + rI * Math.cos(eRad)} ${cy + rI * Math.sin(eRad)} ${d2} Z" fill="${col}"/>`;
+  const paths = arcs.map(({ name, frac, start }) => {
+    const col    = colorForWorker(name);
+    const segLen = Math.max(frac * C - gapLen, 0);
+    const rot    = start * 360 - 90;   // -90 so the ring starts at 12 o'clock
+    return `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${col}" stroke-width="${sw}" stroke-dasharray="${segLen.toFixed(2)} ${C.toFixed(2)}" transform="rotate(${rot.toFixed(2)} ${cx} ${cy})"/>`;
   }).join("");
 
   const centerLabel = `
