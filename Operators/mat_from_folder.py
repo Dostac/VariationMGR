@@ -239,8 +239,10 @@ class MatFromFolderOperator(QtCore.QObject):
         self.source_mat_name   = ""
         self.source_mat_handle = None
 
-        self.folder_root      = ""
-        self.subfolder_column = ""      # CSV column that provides the per-row subfolder
+        self.folder_root        = ""
+        self.folder_root_mode   = "static"   # "static" | "column"
+        self.folder_root_column = ""         # CSV column that provides the per-row root folder
+        self.subfolder_column   = ""         # CSV column that provides the per-row subfolder
 
         self.scale_mode         = "realworld"   # "realworld" | "tiling"
         self.scale_default_u    = "100cm"       # fallback width for real-world mode
@@ -321,16 +323,46 @@ class MatFromFolderOperator(QtCore.QObject):
         lay.setSpacing(5)
         lay.setContentsMargins(8, 8, 8, 8)
 
-        # Root folder row
-        row_root = QtWidgets.QHBoxLayout()
-        row_root.addWidget(QtWidgets.QLabel("Root:"))
+        # Root mode toggle
+        row_mode = QtWidgets.QHBoxLayout()
+        row_mode.addWidget(QtWidgets.QLabel("Root:"))
+        self.chk_root_from_column = QtWidgets.QCheckBox("Get from CSV column")
+        self.chk_root_from_column.setToolTip(
+            "When enabled, the root folder is read per-row from a CSV column,\n"
+            "so the same job can render textures from any folder."
+        )
+        row_mode.addWidget(self.chk_root_from_column)
+        row_mode.addStretch()
+        lay.addLayout(row_mode)
+
+        # Stacked: page 0 = static path, page 1 = column picker
+        self.root_stack = QtWidgets.QStackedWidget()
+
+        page_static = QtWidgets.QWidget()
+        static_lay = QtWidgets.QHBoxLayout(page_static)
+        static_lay.setContentsMargins(0, 0, 0, 0)
+        static_lay.setSpacing(6)
         self.edit_folder = QtWidgets.QLineEdit()
         self.edit_folder.setPlaceholderText("D:/Textures")
         btn_browse = QtWidgets.QPushButton("...")
         btn_browse.setFixedWidth(28)
-        row_root.addWidget(self.edit_folder, stretch=1)
-        row_root.addWidget(btn_browse)
-        lay.addLayout(row_root)
+        static_lay.addWidget(self.edit_folder, stretch=1)
+        static_lay.addWidget(btn_browse)
+        self.root_stack.addWidget(page_static)
+
+        page_column = QtWidgets.QWidget()
+        col_lay = QtWidgets.QHBoxLayout(page_column)
+        col_lay.setContentsMargins(0, 0, 0, 0)
+        col_lay.setSpacing(6)
+        self.combo_root_col = QtWidgets.QComboBox()
+        self.combo_root_col.setToolTip(
+            "CSV column with the per-row root texture folder.\n"
+            "Final path = column_value / subfolder (if set)"
+        )
+        col_lay.addWidget(self.combo_root_col, stretch=1)
+        self.root_stack.addWidget(page_column)
+
+        lay.addWidget(self.root_stack)
 
         # Subfolder column row
         row_sub = QtWidgets.QHBoxLayout()
@@ -415,6 +447,8 @@ class MatFromFolderOperator(QtCore.QObject):
         # Connections
         btn_browse.clicked.connect(self._browse_folder)
         self.edit_folder.textChanged.connect(lambda t: setattr(self, "folder_root", t))
+        self.chk_root_from_column.toggled.connect(self._on_root_mode_changed)
+        self.combo_root_col.currentTextChanged.connect(self._on_root_col_changed)
         self.combo_subfolder_col.currentTextChanged.connect(self._on_subfolder_col_changed)
         self.radio_rws.toggled.connect(self._on_scale_mode_changed)
         self.edit_scale_default_u.textChanged.connect(lambda t: setattr(self, "scale_default_u", t))
@@ -509,6 +543,13 @@ class MatFromFolderOperator(QtCore.QObject):
         hdr.setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
         self.ov_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.ov_table.setAlternatingRowColors(True)
+        self.ov_table.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.ov_table.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.ov_table.setSizeAdjustPolicy(QtWidgets.QAbstractScrollArea.AdjustToContents)
+        self.ov_table.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
+        self.ov_table.verticalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
+        self.ov_table.model().rowsInserted.connect(lambda *_: self._fit_table_height())
+        self.ov_table.model().rowsRemoved.connect(lambda *_: self._fit_table_height())
         lay.addWidget(self.ov_table)
 
         return grp
@@ -529,6 +570,13 @@ class MatFromFolderOperator(QtCore.QObject):
         )
         self.ov_table.setItem(row, 0, name_item)
         self.ov_table.setItem(row, 1, QtWidgets.QTableWidgetItem(pattern))
+
+    def _fit_table_height(self):
+        t = self.ov_table
+        h = t.horizontalHeader().height() + t.frameWidth() * 2
+        for r in range(t.rowCount()):
+            h += t.rowHeight(r)
+        t.setFixedHeight(h)
 
     def _read_overrides(self):
         result = []
@@ -639,6 +687,13 @@ class MatFromFolderOperator(QtCore.QObject):
     def _on_subfolder_col_changed(self, text):
         self.subfolder_column = "" if text == "-- none --" else text
 
+    def _on_root_mode_changed(self, checked):
+        self.folder_root_mode = "column" if checked else "static"
+        self.root_stack.setCurrentIndex(1 if checked else 0)
+
+    def _on_root_col_changed(self, text):
+        self.folder_root_column = "" if text == "-- Select Column --" else text
+
     def _on_scale_mode_changed(self):
         if self.radio_rws.isChecked():
             self.scale_mode = "realworld"
@@ -669,6 +724,16 @@ class MatFromFolderOperator(QtCore.QObject):
         self.combo_subfolder_col.setCurrentIndex(idx if idx != -1 else 0)
         self.combo_subfolder_col.blockSignals(False)
 
+        self.combo_root_col.blockSignals(True)
+        saved_root = self.folder_root_column
+        self.combo_root_col.clear()
+        self.combo_root_col.addItem("-- Select Column --")
+        self.combo_root_col.addItems(columns)
+        idx = self.combo_root_col.findText(saved_root)
+        self.combo_root_col.setCurrentIndex(idx if idx != -1 else 0)
+        self.combo_root_col.blockSignals(False)
+        self.folder_root_column = "" if self.combo_root_col.currentText() == "-- Select Column --" else self.combo_root_col.currentText()
+
     # -----------------------------------------------------------------------
     # Execute
     # -----------------------------------------------------------------------
@@ -681,12 +746,25 @@ class MatFromFolderOperator(QtCore.QObject):
 
     def _execute_real(self, row_data):
         # 1. Resolve folder
-        if not self.folder_root:
-            self._set_status("No root folder set — check step 2.", True)
-            return
+        if self.folder_root_mode == "column":
+            if not self.folder_root_column:
+                self._set_status("Root mode is 'CSV column' but no column is selected — check step 2.", True)
+                return
+            if self.folder_root_column not in row_data:
+                self._set_status(f"Root column '{self.folder_root_column}' missing from row.", True)
+                return
+            root = row_data[self.folder_root_column].strip()
+            if not root:
+                self._set_status(f"Root column '{self.folder_root_column}' is empty for this row.", True)
+                return
+        else:
+            if not self.folder_root:
+                self._set_status("No root folder set — check step 2.", True)
+                return
+            root = self.folder_root
 
         subfolder = row_data.get(self.subfolder_column, "").strip() if self.subfolder_column else ""
-        folder = os.path.join(self.folder_root, subfolder) if subfolder else self.folder_root
+        folder = os.path.join(root, subfolder) if subfolder else root
 
         if not os.path.isdir(folder):
             self._set_status(f"Folder not found: {folder}", True)
@@ -810,6 +888,8 @@ class MatFromFolderOperator(QtCore.QObject):
             "source_mat_name":    self.source_mat_name,
             "source_mat_handle":  self.source_mat_handle,
             "folder_root":        self.folder_root,
+            "folder_root_mode":   self.folder_root_mode,
+            "folder_root_column": self.folder_root_column,
             "subfolder_column":   self.subfolder_column,
             "scale_mode":         self.scale_mode,
             "scale_default_u":    self.scale_default_u,
@@ -830,6 +910,8 @@ class MatFromFolderOperator(QtCore.QObject):
         self.source_mat_name    = data.get("source_mat_name",    "")
         self.source_mat_handle  = data.get("source_mat_handle",  None)
         self.folder_root        = data.get("folder_root",        "")
+        self.folder_root_mode   = data.get("folder_root_mode",   "static")
+        self.folder_root_column = data.get("folder_root_column", "")
         self.subfolder_column   = data.get("subfolder_column",   "")
         self.scale_mode         = data.get("scale_mode",         "realworld")
         self.scale_default_u    = data.get("scale_default_u",    "100cm")
@@ -845,6 +927,10 @@ class MatFromFolderOperator(QtCore.QObject):
         self.multisub_slot      = data.get("multisub_slot",      1)
 
         self.edit_folder.setText(self.folder_root)
+        self.chk_root_from_column.blockSignals(True)
+        self.chk_root_from_column.setChecked(self.folder_root_mode == "column")
+        self.chk_root_from_column.blockSignals(False)
+        self.root_stack.setCurrentIndex(1 if self.folder_root_mode == "column" else 0)
         self.spin_slot.setValue(self.multisub_slot)
         self.edit_scale_default_u.setText(self.scale_default_u)
         self.edit_scale_default_v.setText(self.scale_default_v)
