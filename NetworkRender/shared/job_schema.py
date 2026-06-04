@@ -8,7 +8,10 @@ JOB_SCHEMA_VERSION = 1
 
 _DEFAULT_JOB_REQUEST = {
     "schema_version": JOB_SCHEMA_VERSION,
-    "request_id": "",
+    "request_id": "",           # the submission (1 UI submit -> many scene jobs)
+    "job_id": "",               # one scene job = one render = one log file.
+                                # Worker stamps it for server jobs; empty for
+                                # local renders (the core mints one per scene).
     "scene_file": "",
     "max_files": [],
     "load_scene": True,
@@ -111,6 +114,7 @@ def normalize_job_request(job_request):
         JOB_SCHEMA_VERSION,
     )
     out["request_id"] = str(job_request.get("request_id", "") or "")
+    out["job_id"] = str(job_request.get("job_id", "") or "")
 
     scene_file = job_request.get("scene_file", job_request.get("file", ""))
     out["scene_file"] = _norm_path(scene_file)
@@ -248,6 +252,7 @@ def build_scene_jobs(job_request, already_normalized=False):
             scene_job["scene_file"] = scene_file
             scene_job["max_files"] = []
             scene_job["load_scene"] = True
+            scene_job["job_id"] = ""  # one log file per scene; core mints it
             jobs.append(scene_job)
         return jobs
 

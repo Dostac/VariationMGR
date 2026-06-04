@@ -5,6 +5,7 @@ import datetime
 import importlib.util
 import job_schema as schema
 import variation_core as vcore
+import render_logger
 
 try:
     from PySide6 import QtCore
@@ -177,6 +178,7 @@ def build_scene_jobs(job_request):
 class BatchRendererCore:
     def __init__(self, log_cb=None):
         self.log_cb = log_cb
+        self._rlog = None  # active RenderLog during a scene job, else None
 
     @staticmethod
     def _ensure_runtime():
@@ -190,7 +192,13 @@ class BatchRendererCore:
         self.log_cb = log_cb
 
     def log(self, msg):
-        if callable(self.log_cb):
+        # During a scene job, route through the job's log so it lands in the
+        # output-folder file and is mirrored live to log_cb. Outside a job
+        # (setup, pre-render errors) there is no file yet -- go straight to
+        # the callback / stdout.
+        if self._rlog is not None:
+            self._rlog.write(msg)
+        elif callable(self.log_cb):
             self.log_cb(msg)
         else:
             print(msg)
@@ -405,6 +413,29 @@ class BatchRendererCore:
         if not os.path.exists(out_dir):
             os.makedirs(out_dir, exist_ok=True)
 
+        # Every render gets a job id and its own progress log in the output
+        # folder. Server jobs arrive with a job_id from the worker; local /
+        # interactive renders mint one here, so the path is identical either
+        # way. The core owns the file (it always runs, headless or in 3ds Max);
+        # log_cb only mirrors each line live to whoever is watching.
+        job_id = scene_job.get("job_id") or render_logger.make_job_id(
+            os.path.splitext(os.path.basename(scene_file))[0] if scene_file else ""
+        )
+        scene_job["job_id"] = job_id
+        result["job_id"] = job_id
+
+        mirror = self.log_cb if callable(self.log_cb) else print
+        self._rlog = render_logger.RenderLog(out_dir, job_id, mirror=mirror).open()
+        self.log(f"Job {job_id}")
+        try:
+            return self._run_scene_job(
+                scene_job, output_cfg, render_cfg, scene_file, out_dir, result
+            )
+        finally:
+            self._rlog.close()
+            self._rlog = None
+
+    def _run_scene_job(self, scene_job, output_cfg, render_cfg, scene_file, out_dir, result):
         if scene_job["load_scene"]:
             if not scene_file:
                 self.log("Error: scene_file is required when load_scene=True.")

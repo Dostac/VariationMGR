@@ -467,12 +467,17 @@ class WorkerRuntime:
             self.log(f"Failed to unregister stale worker {worker_id}: {exc}")
             return False
 
-    def _execute_job(self, scene_job):
+    def _execute_job(self, scene_job, job_id=""):
         if self.mock_mode:
             time.sleep(max(0.0, self.mock_render_seconds))
             return {"status": "success", "mock": True}
 
         normalized = schema.normalize_job_request(scene_job)
+        # Carry the worker's job id into the core so its progress log is named
+        # <output_folder>/<job_id>.log -- the file becomes the channel the
+        # worker (and colleagues) tail for live progress.
+        if job_id:
+            normalized["job_id"] = job_id
         fd, job_path = tempfile.mkstemp(prefix="vb_job_", suffix=".json")
         os.close(fd)
         result_path = os.path.join(
@@ -567,7 +572,7 @@ class WorkerRuntime:
         self.log(f"Running job {job_id} :: {scene_path}")
 
         try:
-            result = self._execute_job(scene_job)
+            result = self._execute_job(scene_job, job_id=job_id)
             status = str((result or {}).get("status", "")).lower()
             if status not in ("success", "skipped", "done", "ok"):
                 raise RuntimeError(f"Job returned non-success status: {status or 'unknown'}")
