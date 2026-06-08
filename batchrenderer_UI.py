@@ -116,6 +116,9 @@ class BatchRenderDialog(QtWidgets.QDialog):
         file_bar = QtWidgets.QHBoxLayout()
         file_bar.setSpacing(8)
         self.btn_add         = _ctrl(QtWidgets.QPushButton("＋ Add Files"))
+        self.btn_add_current = _ctrl(QtWidgets.QPushButton("＋ Add Current"))
+        self.btn_add_current.setToolTip(
+            "Add the currently open scene file to the queue.")
         self.btn_assign_csv  = _ctrl(QtWidgets.QPushButton("📊 Assign CSV"))
         self.btn_split_jobs  = _ctrl(QtWidgets.QPushButton("✂ Split for Server"))
         self.btn_split_jobs.setToolTip(
@@ -125,6 +128,7 @@ class BatchRenderDialog(QtWidgets.QDialog):
         self.btn_remove     = _ctrl(QtWidgets.QPushButton("− Remove"))
         self.btn_clear      = _ctrl(QtWidgets.QPushButton("✕ Clear"))
         file_bar.addWidget(self.btn_add)
+        file_bar.addWidget(self.btn_add_current)
         file_bar.addWidget(self.btn_assign_csv)
         file_bar.addWidget(self.btn_split_jobs)
         file_bar.addWidget(self.btn_remove)
@@ -345,11 +349,12 @@ class BatchRenderDialog(QtWidgets.QDialog):
         # CONNECTIONS
         # ------------------------------------------------------------------
         self.btn_add.clicked.connect(self.add_files)
+        self.btn_add_current.clicked.connect(self.add_current_scene)
         self.btn_assign_csv.clicked.connect(self._assign_csv_override)
         self.btn_split_jobs.clicked.connect(self._split_for_server)
         self.btn_set_range.clicked.connect(self._set_row_range)
         self.btn_clear_range.clicked.connect(self._clear_row_range)
-        self.tree_widget.itemSelectionChanged.connect(self._update_split_button_state)
+        self.tree_widget.itemSelectionChanged.connect(self._update_queue_button_states)
         self.btn_remove.clicked.connect(self.remove_files)
         self.btn_clear.clicked.connect(self.clear_files)
         self.btn_browse.clicked.connect(self.browse_path)
@@ -385,6 +390,7 @@ class BatchRenderDialog(QtWidgets.QDialog):
         self.log(f"Config: {self.get_ini_path()}")
         self.log("Ready.")
         self._disable_combo_wheel(self)
+        self._update_queue_button_states()
         self._is_initializing = False
 
     # -----------------------------------------------------------------------
@@ -393,13 +399,22 @@ class BatchRenderDialog(QtWidgets.QDialog):
 
     def _disable_combo_wheel(self, root):
         """Install the no-wheel filter on every QComboBox and spin box under
-        `root` so scrolling the panel doesn't scrub their values. Idempotent:
-        each widget is marked so re-running on freshly-added widgets is safe."""
+        `root` so scrolling the panel doesn't scrub their values. A spin box
+        wraps an internal QLineEdit that receives the wheel event when the
+        cursor is over the number field, so the filter is installed on that
+        child too — otherwise scrolling the text area still scrubs the value.
+        Idempotent: each widget is marked so re-running on freshly-added
+        widgets is safe."""
         if root is None:
             return
         marker = "_br_no_wheel_installed"
-        for widget in (root.findChildren(QtWidgets.QComboBox)
-                       + root.findChildren(QtWidgets.QAbstractSpinBox)):
+        widgets = (root.findChildren(QtWidgets.QComboBox)
+                   + root.findChildren(QtWidgets.QAbstractSpinBox))
+        for spin in root.findChildren(QtWidgets.QAbstractSpinBox):
+            line_edit = spin.lineEdit()
+            if line_edit is not None:
+                widgets.append(line_edit)
+        for widget in widgets:
             if widget.property(marker):
                 continue
             widget.installEventFilter(self._no_wheel_filter)
@@ -623,6 +638,30 @@ class BatchRenderDialog(QtWidgets.QDialog):
                 added = True
         if added:
             self.save_ini()
+
+    def add_current_scene(self):
+        """Add the currently open .max scene to the queue, deduping against
+        entries already present. The on-disk file is what renders, so this
+        requires the scene to have been saved at least once."""
+        if not rt.maxFileName:
+            self.log("Current scene is unsaved. Save the .max file first.")
+            return
+        scene_path = (rt.maxFilePath + rt.maxFileName).replace("\\", "/")
+        if not scene_path.strip("/") or not os.path.isfile(scene_path):
+            self.log("No scene is currently open.")
+            return
+        if scene_path in {e["path"] for e in self.file_entries}:
+            self.log(f"Already in queue: {os.path.basename(scene_path)}")
+            return
+        entry = {"path": scene_path, "var_json": "", "csv_file": "", "split_size": 0,
+                 "row_range_expr": "", "row_start": 0, "row_end": 0}
+        self.file_entries.append(entry)
+        self.tree_widget.addTopLevelItem(self._make_tree_item(scene_path, entry))
+        self.log(f"Added current scene: {os.path.basename(scene_path)}")
+        if rt.getSaveRequired():
+            self.log("  Note: scene has unsaved changes — the file on disk will be "
+                     "rendered, not the current viewport state.")
+        self.save_ini()
 
     def remove_files(self):
         selected = self.tree_widget.selectedItems()
@@ -881,6 +920,18 @@ class BatchRenderDialog(QtWidgets.QDialog):
             self.file_entries[i]["row_end"]        = 0
             self._refresh_tree_item(self.tree_widget.topLevelItem(i), self.file_entries[i])
         self.save_ini()
+
+    def _update_queue_button_states(self):
+        """Drive the enabled state of queue action buttons from the current
+        selection. Buttons that operate on selected entries are dimmed when
+        nothing is selected, since they would otherwise just no-op with a log
+        message. The split button has the stricter requirement of selected
+        override data, handled by _update_split_button_state."""
+        has_selection = bool(self.tree_widget.selectedItems())
+        for btn in (self.btn_assign_csv, self.btn_remove,
+                    self.btn_set_range, self.btn_clear_range):
+            btn.setEnabled(has_selection)
+        self._update_split_button_state()
 
     def _update_split_button_state(self):
         """Enable the split button only if a selected entry has var_json or csv_file."""

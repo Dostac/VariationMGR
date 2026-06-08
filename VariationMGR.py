@@ -24,7 +24,7 @@ import variation_core as vcore
 
 class _NoWheelFilter(QtCore.QObject):
     """Swallows wheel events so a widget doesn't scrub its value when the user
-    is trying to scroll the surrounding panel. Installed on QComboBoxes."""
+    is trying to scroll the surrounding panel. Installed on combo and spin boxes."""
     def eventFilter(self, obj, event):
         if event.type() == QtCore.QEvent.Wheel:
             event.ignore()
@@ -350,18 +350,30 @@ class VariationManager(QtWidgets.QDialog):
         self.columns_changed.connect(self._on_cam_columns_changed)
 
     def _disable_combo_wheel(self, root):
-        """Install the no-wheel filter on every QComboBox under `root`. Idempotent:
-        each combo is marked so re-running on freshly-added widgets is safe."""
+        """Install the no-wheel filter on every combo and spin box under `root`.
+        Called on the manager itself and on each operator's get_ui() widget when
+        a tab is added, so operators inherit this behavior without doing anything
+        themselves. A spin box wraps an internal QLineEdit that receives the wheel
+        event when the cursor is over the number field, so the filter is installed
+        on that child too — otherwise scrolling the text area still scrubs the
+        value. Idempotent: each widget is marked so re-running on freshly-added
+        widgets is safe."""
         if not self.DISABLE_COMBO_WHEEL:
             return
         if root is None:
             return
         marker = "_vm_no_wheel_installed"
-        for combo in root.findChildren(QComboBox):
-            if combo.property(marker):
+        widgets = (root.findChildren(QComboBox)
+                   + root.findChildren(QtWidgets.QAbstractSpinBox))
+        for spin in root.findChildren(QtWidgets.QAbstractSpinBox):
+            line_edit = spin.lineEdit()
+            if line_edit is not None:
+                widgets.append(line_edit)
+        for widget in widgets:
+            if widget.property(marker):
                 continue
-            combo.installEventFilter(self._no_wheel_filter)
-            combo.setProperty(marker, True)
+            widget.installEventFilter(self._no_wheel_filter)
+            widget.setProperty(marker, True)
 
     def _show_more_menu(self):
         """Drop-down on the ⚙ toolbar button: secondary actions that aren't
