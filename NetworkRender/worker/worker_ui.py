@@ -2,7 +2,7 @@ import datetime
 import sys
 from pathlib import Path
 
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 
 if __package__ is None or __package__ == "":
     repo_root = Path(__file__).resolve().parents[2]
@@ -69,12 +69,24 @@ class WorkerWindow(QtWidgets.QMainWindow):
         root.addWidget(log_group, stretch=1)
 
         buttons = QtWidgets.QHBoxLayout()
+        self.lbl_color = QtWidgets.QLabel("Dashboard color:")
+        self.color_swatch = QtWidgets.QFrame()
+        self.color_swatch.setFixedSize(18, 18)
+        self.color_swatch.setFrameShape(QtWidgets.QFrame.Shape.Box)
+        self.btn_color = QtWidgets.QPushButton("Pick…")
+        self.btn_color.setToolTip("Choose the color this worker shows as in the server dashboard.")
+        self.btn_color_auto = QtWidgets.QPushButton("Auto")
+        self.btn_color_auto.setToolTip("Clear the custom color and let the dashboard auto-assign one.")
         self.btn_refresh = QtWidgets.QPushButton("Refresh")
         self.btn_discover = QtWidgets.QPushButton("Discover Server")
         self.btn_stop = QtWidgets.QPushButton("Stop Worker")
         self.btn_start = QtWidgets.QPushButton("Start Worker")
         self.chk_autoscroll = QtWidgets.QCheckBox("Auto-scroll log")
         self.chk_autoscroll.setChecked(True)
+        buttons.addWidget(self.lbl_color)
+        buttons.addWidget(self.color_swatch)
+        buttons.addWidget(self.btn_color)
+        buttons.addWidget(self.btn_color_auto)
         buttons.addStretch()
         buttons.addWidget(self.chk_autoscroll)
         buttons.addWidget(self.btn_refresh)
@@ -83,10 +95,15 @@ class WorkerWindow(QtWidgets.QMainWindow):
         buttons.addWidget(self.btn_start)
         root.addLayout(buttons)
 
+        self.btn_color.clicked.connect(self.pick_color)
+        self.btn_color_auto.clicked.connect(self.clear_color)
         self.btn_refresh.clicked.connect(self.refresh)
         self.btn_discover.clicked.connect(self.discover_server)
         self.btn_stop.clicked.connect(self.stop_worker)
         self.btn_start.clicked.connect(self.start_worker)
+
+        self._last_swatch = object()  # force first swatch paint
+        self._update_color_swatch(self.runtime.get_color())
 
         self.timer = QtCore.QTimer(self)
         self.timer.setInterval(1000)
@@ -108,6 +125,29 @@ class WorkerWindow(QtWidgets.QMainWindow):
         self.runtime.stop()
         self.refresh()
 
+    def pick_color(self):
+        current = self.runtime.get_color()
+        initial = QtGui.QColor(current) if current else QtGui.QColor("#79c0ff")
+        chosen = QtWidgets.QColorDialog.getColor(initial, self, "Choose Worker Color")
+        if not chosen.isValid():
+            return
+        self._update_color_swatch(self.runtime.set_color(chosen.name()))
+
+    def clear_color(self):
+        self._update_color_swatch(self.runtime.set_color(""))
+
+    def _update_color_swatch(self, color):
+        color = color or ""
+        if color == self._last_swatch:
+            return
+        self._last_swatch = color
+        if color:
+            self.color_swatch.setStyleSheet(f"background-color: {color}; border: 1px solid #555;")
+            self.color_swatch.setToolTip(f"Worker color: {color}")
+        else:
+            self.color_swatch.setStyleSheet("background-color: transparent; border: 1px dashed #888;")
+            self.color_swatch.setToolTip("Worker color: auto (assigned by the dashboard)")
+
     def discover_server(self):
         found = self.runtime.discover_server(timeout_sec=2.0)
         if found:
@@ -118,6 +158,7 @@ class WorkerWindow(QtWidgets.QMainWindow):
 
     def refresh(self):
         s = self.runtime.snapshot()
+        self._update_color_swatch(s.get("worker_color", ""))
         done = int(s.get("jobs_done", 0))
         failed = int(s.get("jobs_failed", 0))
         claimed = int(s.get("jobs_claimed", 0))

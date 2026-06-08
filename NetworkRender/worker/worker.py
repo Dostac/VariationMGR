@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -137,6 +138,59 @@ def _load_or_create_worker_id(path, machine_key=""):
     return wid
 
 
+_HEX_COLOR_RE = re.compile(r"^#?([0-9a-fA-F]{6})$")
+
+
+def _normalize_hex_color(value):
+    """Return '#rrggbb' (lowercase) for a valid 6-digit hex, else '' (auto color)."""
+    m = _HEX_COLOR_RE.match(str(value or "").strip())
+    return "#" + m.group(1).lower() if m else ""
+
+
+def _load_worker_color(path, machine_key=""):
+    """Read this machine's saved worker color from the identity file ('' if none)."""
+    key = (machine_key or _hostname() or "worker").strip().lower()
+    try:
+        if os.path.isfile(path):
+            with open(path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            if isinstance(payload, dict):
+                colors = payload.get("worker_colors", {})
+                if isinstance(colors, dict):
+                    return _normalize_hex_color(colors.get(key, ""))
+    except Exception:
+        pass
+    return ""
+
+
+def _save_worker_color(path, machine_key, color):
+    """Persist (or clear, if color is '') this machine's worker color."""
+    key = (machine_key or _hostname() or "worker").strip().lower()
+    color = _normalize_hex_color(color)
+    payload = {}
+    try:
+        if os.path.isfile(path):
+            with open(path, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                payload = loaded
+    except Exception:
+        payload = {}
+    colors = payload.get("worker_colors", {})
+    if not isinstance(colors, dict):
+        colors = {}
+    if color:
+        colors[key] = color
+    else:
+        colors.pop(key, None)
+    payload["worker_colors"] = colors
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+    except Exception:
+        pass
+
+
 def _find_3dsmaxbatch():
     env_val = os.environ.get("VB_MAX_BATCH_EXE", "").strip()
     if env_val and os.path.isfile(env_val):
@@ -198,6 +252,7 @@ class WorkerConfig:
     networkrender_script: str = ""
     job_timeout_sec: int = 0
     discovery_port: int = DEFAULT_DISCOVERY_PORT
+    color: str = ""
 
     @classmethod
     def from_args(cls, args):
@@ -215,6 +270,7 @@ class WorkerConfig:
             networkrender_script=args.networkrender_script,
             job_timeout_sec=args.job_timeout_sec,
             discovery_port=args.discovery_port,
+            color=getattr(args, "color", ""),
         )
 
 
@@ -228,12 +284,19 @@ class WorkerRuntime:
 
         self._config = config
         self.server_url = server_client.normalize_server_url(config.server_url)
+        self._identity_path = _default_worker_id_path()
+        self._color_key = resolved_host
         self.worker_id = config.worker_id.strip() or _load_or_create_worker_id(
-            _default_worker_id_path(),
+            self._identity_path,
             machine_key=resolved_host,
         )
         self.worker_name = config.worker_name.strip() or f"{_hostname()}-{self.worker_id[:8]}"
         self.host = resolved_host
+        # Optional worker-chosen dashboard color: CLI flag wins, else the saved
+        # per-machine value. Empty means the dashboard auto-assigns a hue.
+        self.worker_color = _normalize_hex_color(config.color) or _load_worker_color(
+            self._identity_path, resolved_host
+        )
         self.poll_interval = float(config.poll_interval)
         self.heartbeat_interval = float(config.heartbeat_interval)
         self.mock_mode = bool(config.mock_mode)
@@ -292,6 +355,7 @@ class WorkerRuntime:
                 "max_batch_exe": self.max_batch_exe,
                 "networkrender_script": self.networkrender_script,
                 "job_timeout_sec": self.job_timeout_sec,
+                "worker_color": self.worker_color,
                 "recent_events": list(self.recent_events),
             }
 
@@ -327,7 +391,22 @@ class WorkerRuntime:
             return {
                 "status": self.current_status,
                 "current_job_id": self.current_job_id,
+                "color": self.worker_color,
             }
+
+    def get_color(self):
+        with self._lock:
+            return self.worker_color
+
+    def set_color(self, color):
+        """Set this worker's dashboard color (''=auto), persist it, and let the
+        next heartbeat propagate it to the server. Returns the normalized value."""
+        normalized = _normalize_hex_color(color)
+        with self._lock:
+            self.worker_color = normalized
+        _save_worker_color(self._identity_path, self._color_key, normalized)
+        self.log(f"Worker color set to {normalized or '(auto)'}")
+        return normalized
 
     def _api_request(self, method, path, payload=None, timeout=10):
         base = self._get_server_url()
@@ -369,6 +448,7 @@ class WorkerRuntime:
             "host": self.host,
             "status": "idle",
             "capabilities": {"mock_mode": self.mock_mode},
+            "color": self.worker_color,
         }
         out = self._api_post("/workers/register", payload)
         with self._lock:
@@ -706,6 +786,7 @@ def parse_args():
     parser.add_argument("--worker-id", default="", help="Stable worker id (optional)")
     parser.add_argument("--worker-name", default="", help="Display worker name (optional)")
     parser.add_argument("--host", default="", help="Worker host label (optional)")
+    parser.add_argument("--color", default="", help="Dashboard color as #rrggbb hex (optional; blank = auto)")
     parser.add_argument("--poll-interval", type=float, default=2.0, help="Job polling interval seconds")
     parser.add_argument("--heartbeat-interval", type=float, default=5.0, help="Heartbeat interval seconds")
     parser.add_argument("--discovery-port", type=int, default=DEFAULT_DISCOVERY_PORT, help="UDP discovery port")

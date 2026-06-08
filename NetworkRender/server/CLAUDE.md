@@ -45,7 +45,8 @@ State repair logic removes dangling references, de-duplicates queue entries, req
 - `GET /jobs` and `GET /jobs/{job_id}`: list or inspect jobs.
 - `GET /workers`: current worker snapshot list.
 - `POST /submit`: normalize request and enqueue one job per scene file.
-- `POST /workers/register`: register/refresh worker identity.
+- `POST /workers/register`: register/refresh worker identity (accepts an optional `color` hex).
+- Worker heartbeats may also carry `color`; the server sanitizes it to `#rrggbb` (or `""`) and the dashboard prefers it over the auto-assigned hue.
 - `POST /workers/{id}/heartbeat`: update worker status and activity.
 - `POST /workers/{id}/claim`: claim next queued job.
 - `POST /workers/{id}/job/{job_id}/status`: worker status update for a claimed job.

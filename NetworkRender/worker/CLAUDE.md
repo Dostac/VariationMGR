@@ -8,7 +8,7 @@ This folder contains the worker runtime, the single-job batch script invoked by 
 
 ### CLI
 
-`python worker.py [--server-url URL] [--worker-id ID] [--worker-name NAME] [--host HOST] [--mock] [--ui] ...`
+`python worker.py [--server-url URL] [--worker-id ID] [--worker-name NAME] [--host HOST] [--color #rrggbb] [--mock] [--ui] ...`
 
 The `--ui` flag launches the PySide6 dashboard (`worker_ui.py`) instead of headless mode.
 
@@ -24,6 +24,7 @@ The `--ui` flag launches the PySide6 dashboard (`worker_ui.py`) instead of headl
 ### Identity and Discovery
 
 - Worker id is persisted per machine key in `worker_identity.json` under `%LOCALAPPDATA%\VirtualBuilders\VariationMGR` (with home/temp fallbacks).
+- An optional per-machine dashboard color (`#rrggbb`) is persisted in the same file under `worker_colors` and sent in both register and heartbeat payloads. Empty = the dashboard auto-assigns a hue. Set it with `--color` or the UI color picker (`set_color`/`get_color` on the runtime).
 - If no `server_url` is provided, worker uses UDP broadcast discovery through `NetworkRender.shared.server_client.discover_server`.
 
 ### Main Loop Behavior
@@ -74,4 +75,5 @@ The UI shows:
 Available actions:
 - Start/stop runtime thread.
 - Trigger discovery manually.
+- Pick a dashboard color (swatch + color dialog) or reset to Auto.
 - Auto-detect duplicate worker entries on the same host and unregister stale entries via server API.

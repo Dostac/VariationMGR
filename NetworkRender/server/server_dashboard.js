@@ -64,8 +64,41 @@ function _assignHue(name) {
   return _workerHues[name];
 }
 
+// Worker-chosen colors sent by the server, keyed by display name. Populated
+// from each snapshot and kept across snapshots so a worker keeps its color in
+// the charts even after it disconnects. A worker color overrides the auto hue.
+const _serverColors = {};
+
+function normalizeHex(v) {
+  if (!v) return "";
+  const s = String(v).trim();
+  return /^#[0-9a-fA-F]{6}$/.test(s) ? s.toLowerCase() : "";
+}
+
+function updateServerColors(workers) {
+  for (const w of (workers || [])) {
+    const hex = normalizeHex(w.color);
+    if (w.name && hex) _serverColors[w.name] = hex;
+  }
+}
+
+function _colorsFromHex(hex) {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return {
+    color:  hex,
+    tint:   `rgba(${r},${g},${b},0.15)`,
+    faint:  `rgba(${r},${g},${b},0.10)`,
+    border: `rgba(${r},${g},${b},0.35)`,
+  };
+}
+
 function workerColors(name) {
-  const h = _assignHue(String(name || "unknown"));
+  const key = String(name || "unknown");
+  const custom = _serverColors[key];
+  if (custom) return _colorsFromHex(custom);
+  const h = _assignHue(key);
   return {
     color:  `hsl(${h},${_WS}%,${_WL}%)`,
     tint:   `hsla(${h},${_WS}%,${_WL}%,0.15)`,
@@ -404,6 +437,7 @@ async function loadData() {
   try {
     const data = await fetchJson("/dashboard_data");
     lastSnapshot = data;
+    updateServerColors(data.workers || []);
     renderStats(data);
     renderWorkers(data.workers || []);
     renderJobs(data.jobs || []);

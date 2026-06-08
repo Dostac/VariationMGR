@@ -3,6 +3,7 @@ import copy
 import ipaddress
 import json
 import os
+import re
 import socket
 import sys
 import tempfile
@@ -111,6 +112,15 @@ def _is_local_network_ip(ip_text):
         or ip.is_loopback
         or ip.is_link_local
     )
+
+
+_HEX_COLOR_RE = re.compile(r"^#?([0-9a-fA-F]{6})$")
+
+
+def _normalize_hex_color(value):
+    """Return '#rrggbb' (lowercase) for a valid 6-digit hex, else '' (use auto color)."""
+    m = _HEX_COLOR_RE.match(str(value or "").strip())
+    return "#" + m.group(1).lower() if m else ""
 
 
 class JobServerState:
@@ -315,6 +325,7 @@ class JobServerState:
                 "host": worker_info.get("host", ""),
                 "capabilities": worker_info.get("capabilities", {}),
                 "status": worker_info.get("status", "idle"),
+                "color": _normalize_hex_color(worker_info.get("color", "")),
                 "last_seen": now,
                 "current_job_id": None,
             }
@@ -354,6 +365,8 @@ class JobServerState:
                 return None
             if "status" in status_payload:
                 worker["status"] = status_payload["status"]
+            if "color" in status_payload:
+                worker["color"] = _normalize_hex_color(status_payload["color"])
             worker["last_seen"] = now
             if "current_job_id" in status_payload:
                 cur_job_id = status_payload["current_job_id"]
@@ -799,6 +812,7 @@ def build_dashboard_payload(server):
             "status": w.get("status", ""),
             "current_scene": cur_scene,
             "last_seen_ts": w.get("last_seen") or 0,
+            "color": w.get("color", "") or "",
         })
 
     now_ts = time.time()
