@@ -40,8 +40,9 @@ class CollapsibleSection(QtWidgets.QWidget):
 
 class FloorGeneratorOperator(QtCore.QObject):
     """
-    Static Fields: Texture Library, Recursive Checkbox, Floor Object, Rotate 90 Checkbox.
-    Properties (Driven): Plank Name, Length, Width, Laying Pattern.
+    Static Fields: Texture Library, Recursive Checkbox, Floor Object, Rotate 90 Checkbox,
+        MultiMap fixed Seed value.
+    Properties (Driven): Plank Name, Length, Width, Laying Pattern, optional MultiMap Seed.
     """
     status_changed = QtCore.Signal(str, bool)
 
@@ -70,6 +71,12 @@ class FloorGeneratorOperator(QtCore.QObject):
         self.row_offset_lock = False
         self.col_row_offset_min = ""
         self.col_row_offset_max = ""
+
+        # --- MultiMap Seed Override (Optional) ---
+        self.override_seed = False      # master on/off for the seed feature
+        self.seed_from_column = False   # if True, seed comes from a CSV column; else fixed value
+        self.seed_value = 1             # fixed seed applied to every row when not column-driven
+        self.col_seed = ""
 
         self.main_widget = QtWidgets.QWidget()
         self._setup_ui()
@@ -217,6 +224,57 @@ class FloorGeneratorOperator(QtCore.QObject):
         lay4.addWidget(self.row_offset_widget)
 
         content_root.addWidget(grp4)
+        content_root.addSpacing(8)
+
+        # --- Card 5: MultiMap Seed Override (Optional) ---
+        grp5 = CollapsibleSection("5. MultiMap Seed Override")
+        lay5 = grp5.content_layout
+
+        self.chk_override_seed = QtWidgets.QCheckBox("Enable Seed Override")
+        lay5.addWidget(self.chk_override_seed)
+
+        # Sub-widget enabled/disabled as a unit by the master checkbox
+        self.seed_widget = QtWidgets.QWidget()
+        self.seed_widget.setEnabled(False)
+        seed_lay = QtWidgets.QVBoxLayout(self.seed_widget)
+        seed_lay.setContentsMargins(0, 0, 0, 0)
+        seed_lay.setSpacing(8)
+
+        self.chk_seed_from_column = QtWidgets.QCheckBox("Drive seed from column")
+        seed_lay.addWidget(self.chk_seed_from_column)
+
+        # Stacked widget: page 0 = fixed value, page 1 = column picker
+        self.seed_stack = QtWidgets.QStackedWidget()
+
+        seed_page_fixed = QtWidgets.QWidget()
+        seed_fixed_lay = QtWidgets.QVBoxLayout(seed_page_fixed)
+        seed_fixed_lay.setContentsMargins(0, 0, 0, 0)
+        seed_fixed_lay.setSpacing(8)
+        seed_value_row = QtWidgets.QHBoxLayout()
+        seed_value_row.addWidget(QtWidgets.QLabel("Seed value:"))
+        self.spin_seed = QtWidgets.QSpinBox()
+        self.spin_seed.setRange(0, 2147483647)
+        self.spin_seed.setValue(1)
+        self.spin_seed.setFixedWidth(120)
+        seed_value_row.addWidget(self.spin_seed)
+        seed_value_row.addStretch()
+        seed_fixed_lay.addLayout(seed_value_row)
+        self.seed_stack.addWidget(seed_page_fixed)
+
+        seed_page_column = QtWidgets.QWidget()
+        seed_col_lay = QtWidgets.QVBoxLayout(seed_page_column)
+        seed_col_lay.setContentsMargins(0, 0, 0, 0)
+        seed_col_lay.setSpacing(8)
+        seed_col_lay.addWidget(QtWidgets.QLabel("Seed Column:"))
+        self.combo_seed = QtWidgets.QComboBox()
+        seed_col_lay.addWidget(self.combo_seed)
+        self.seed_stack.addWidget(seed_page_column)
+
+        seed_lay.addWidget(self.seed_stack)
+
+        lay5.addWidget(self.seed_widget)
+
+        content_root.addWidget(grp5)
 
         content_root.addStretch()
 
@@ -236,10 +294,15 @@ class FloorGeneratorOperator(QtCore.QObject):
         self.combo_size.currentTextChanged.connect(lambda t: setattr(self, 'col_size', t))
         self.combo_row_offset_min.currentTextChanged.connect(lambda t: setattr(self, 'col_row_offset_min', t))
         self.combo_row_offset_max.currentTextChanged.connect(lambda t: setattr(self, 'col_row_offset_max', t))
+        self.combo_seed.currentTextChanged.connect(lambda t: setattr(self, 'col_seed', t))
+        self.spin_seed.valueChanged.connect(lambda v: setattr(self, 'seed_value', v))
         self.chk_combined_size.toggled.connect(self._on_size_mode_toggled)
 
         self.chk_override_row_offset.toggled.connect(self._on_row_offset_override_toggled)
         self.chk_row_offset_lock.toggled.connect(self._on_row_offset_lock_toggled)
+
+        self.chk_override_seed.toggled.connect(self._on_seed_override_toggled)
+        self.chk_seed_from_column.toggled.connect(self._on_seed_mode_toggled)
 
     # --- Manager Interface ---
 
@@ -256,6 +319,7 @@ class FloorGeneratorOperator(QtCore.QObject):
             (self.combo_size, self.col_size),
             (self.combo_row_offset_min, self.col_row_offset_min),
             (self.combo_row_offset_max, self.col_row_offset_max),
+            (self.combo_seed, self.col_seed),
         ]
 
         for combo, target_val in combos:
@@ -275,6 +339,7 @@ class FloorGeneratorOperator(QtCore.QObject):
         self.col_size    = self.combo_size.currentText()
         self.col_row_offset_min = self.combo_row_offset_min.currentText()
         self.col_row_offset_max = self.combo_row_offset_max.currentText()
+        self.col_seed    = self.combo_seed.currentText()
 
     def execute(self, row_data):
         if not self.rt or not self.target_node_name: return
@@ -316,6 +381,19 @@ class FloorGeneratorOperator(QtCore.QObject):
         if not multi_map:
             self._set_status("CoronaMultiMap not found in object's material.", True)
             return
+
+        # 2.5 Apply MultiMap Seed Override
+        if self.override_seed:
+            try:
+                if self.seed_from_column:
+                    seed_value = int(self._get_float_from_row(row_data, self.col_seed, "Seed"))
+                else:
+                    seed_value = int(self.seed_value)
+                if self.rt.isProperty(multi_map, "seed"):
+                    multi_map.seed = seed_value
+            except ValueError as e:
+                self._set_status(str(e), True)
+                return
 
         # 3. Apply Pattern and Dimensions
         pat_lower = pattern_str.lower()
@@ -427,6 +505,14 @@ class FloorGeneratorOperator(QtCore.QObject):
         self.row_offset_lock = checked
         self.row_offset_max_container.setVisible(not checked)
 
+    def _on_seed_override_toggled(self, checked):
+        self.override_seed = checked
+        self.seed_widget.setEnabled(checked)
+
+    def _on_seed_mode_toggled(self, checked):
+        self.seed_from_column = checked
+        self.seed_stack.setCurrentIndex(1 if checked else 0)
+
     def _browse_lib(self):
         folder = QtWidgets.QFileDialog.getExistingDirectory(None, "Select Texture Library")
         if folder:
@@ -529,6 +615,10 @@ class FloorGeneratorOperator(QtCore.QObject):
             "row_offset_lock": self.row_offset_lock,
             "col_row_offset_min": self.col_row_offset_min,
             "col_row_offset_max": self.col_row_offset_max,
+            "override_seed": self.override_seed,
+            "seed_from_column": self.seed_from_column,
+            "seed_value": self.seed_value,
+            "col_seed": self.col_seed,
         }
 
     def deserialize(self, data):
@@ -551,6 +641,11 @@ class FloorGeneratorOperator(QtCore.QObject):
         self.col_row_offset_min = data.get("col_row_offset_min", "")
         self.col_row_offset_max = data.get("col_row_offset_max", "")
 
+        self.override_seed = data.get("override_seed", False)
+        self.seed_from_column = data.get("seed_from_column", False)
+        self.seed_value = data.get("seed_value", 1)
+        self.col_seed = data.get("col_seed", "")
+
         self.edit_path.setText(self.tex_path)
         self.chk_recursive.setChecked(self.recursive_search)
         self.spin_max_textures.setValue(self.max_textures)
@@ -560,6 +655,12 @@ class FloorGeneratorOperator(QtCore.QObject):
         self.chk_override_row_offset.setChecked(self.override_row_offset)
         self.chk_row_offset_lock.setChecked(self.row_offset_lock)
         self._on_row_offset_lock_toggled(self.row_offset_lock)
+
+        self.spin_seed.setValue(self.seed_value)
+        self.chk_override_seed.setChecked(self.override_seed)
+        self.chk_seed_from_column.setChecked(self.seed_from_column)
+        self._on_seed_override_toggled(self.override_seed)
+        self._on_seed_mode_toggled(self.seed_from_column)
 
         if self.target_node_name:
             self.lbl_floor_info.setText(f"Target: {self.target_node_name}")
