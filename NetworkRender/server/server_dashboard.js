@@ -11,6 +11,11 @@ let dragging = false;
 // Anchor row for shift-range selection (last row clicked without shift).
 let selectionAnchorId = null;
 
+// Job ids currently open in the edit modal (one for single edit, many for a
+// multi-select edit). While non-empty, polling is suspended so a background
+// refresh can't overwrite the form values the user is editing.
+let editingJobIds = [];
+
 const perfFilter = {
   workers: new Set(),
   statusMode: "done",
@@ -150,6 +155,9 @@ const COPY_ICON = `<svg viewBox="0 0 16 16" width="13" height="13" fill="none" s
 
 // Drag-handle glyph shown on queued rows (drag to reorder the queue).
 const GRIP_ICON = `<svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor"><circle cx="6" cy="4" r="1.3"/><circle cx="10" cy="4" r="1.3"/><circle cx="6" cy="8" r="1.3"/><circle cx="10" cy="8" r="1.3"/><circle cx="6" cy="12" r="1.3"/><circle cx="10" cy="12" r="1.3"/></svg>`;
+
+// Pencil glyph for the per-row edit button.
+const EDIT_ICON = `<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round"><path d="M11.5 2.5l2 2L6 12l-2.5.5L4 10z"/><path d="M10.5 3.5l2 2"/></svg>`;
 
 // Windows-native (backslash) form so the copied value pastes straight into Explorer.
 function toNativePath(p) {
@@ -364,7 +372,7 @@ function renderJobs(jobs) {
   }
 
   if (!shown.length) {
-    tbody.innerHTML = `<tr><td colspan="9" class="empty">No jobs${jobTabFilter !== "all" ? " in this filter" : ""}.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="10" class="empty">No jobs${jobTabFilter !== "all" ? " in this filter" : ""}.</td></tr>`;
     updateSelectionUI(0);
     return;
   }
@@ -399,6 +407,7 @@ function renderJobs(jobs) {
       <td style="color:var(--text-muted)">${esc(j.attempts)}</td>
       <td style="color:var(--text-muted);font-size:0.75rem">${esc(fmtTime(j.updated_at_ts))}</td>
       <td title="${esc(j.last_error)}" style="color:var(--red);font-size:0.75rem;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(j.last_error || "—")}</td>
+      <td class="col-edit"><button class="edit-btn" data-edit="${esc(j.job_id)}" title="Edit render/output settings" aria-label="Edit job settings">${EDIT_ICON}</button></td>
     </tr>`;
   }).join("");
 
@@ -408,8 +417,10 @@ function renderJobs(jobs) {
 
 function updateSelectionUI(visibleCount) {
   const n = selectedJobIds.size;
+  $("btn-edit-sel").disabled    = n === 0;
   $("btn-requeue-sel").disabled = n === 0;
   $("btn-remove-sel").disabled  = n === 0;
+  $("btn-edit-sel").textContent    = n > 1 ? `Edit Selected (${n})`    : "Edit Selected";
   $("btn-requeue-sel").textContent = n > 1 ? `Requeue Selected (${n})` : "Requeue Selected";
   $("btn-remove-sel").textContent  = n > 1 ? `Remove Selected (${n})`  : "Remove Selected";
 
@@ -434,6 +445,7 @@ function updateSelectionUI(visibleCount) {
 
 async function loadData() {
   if (dragging) return;   // don't rebuild the table mid-drag
+  if (editingJobIds.length) return;   // don't disturb the open edit modal
   try {
     const data = await fetchJson("/dashboard_data");
     lastSnapshot = data;
@@ -813,6 +825,310 @@ async function actToggleAutoRequeue() {
   } catch (e) { toast("Toggle auto-requeue failed: " + e.message, true); }
 }
 
+// ── Edit job modal ─────────────────────────────────────────────────────────────
+
+// Per-format Bit Depth options, mirroring on_format_changed() in
+// batchrenderer_UI.py. The stored output.depth_index is an index into the
+// list for the current format. jpg is fixed 8-bit (disabled) and hides alpha.
+const DEPTH_OPTS = {
+  jpg: ["8-bit (Fixed)"],
+  png: ["8-bit", "16-bit"],
+  tif: ["8-bit", "16-bit"],
+  exr: ["16-bit (Half)", "32-bit (Float)", "32-bit (Integer)"],
+};
+
+const MIXED = "__mixed__";   // synthetic <select> value for differing selections
+
+// Field ids the user has touched since the modal opened. Only touched fields
+// (plus fields that started non-mixed) are written on save, so untouched
+// "mixed" fields preserve each job's own value. See computeSave().
+const editTouched = new Set();
+
+function findJob(jobId) {
+  if (!lastSnapshot) return null;
+  return (lastSnapshot.jobs || []).find((j) => j.job_id === jobId) || null;
+}
+
+// Are all values in `arr` equal (by ===)? Empty/one-element arrays are "same".
+function allSame(arr) {
+  return arr.every((v) => v === arr[0]);
+}
+
+// Show the resolution/pass/noise block only when "Override scene render
+// settings" is on, matching widget_settings visibility in the batch renderer.
+// While the override checkbox is in the mixed (indeterminate) state we keep the
+// block expanded so its sub-fields remain reachable.
+function syncOverrideBlock() {
+  const c = $("f-override-settings");
+  $("f-settings-block").hidden = !(c.checked || c.indeterminate);
+}
+
+// Repopulate the Bit Depth dropdown for the chosen format and toggle the alpha
+// row (hidden for jpg). Keeps the previously selected index when still valid.
+// When `desiredDepthIndex` is MIXED, a synthetic mixed option is shown instead.
+function syncFormatDependents(desiredDepthIndex) {
+  const fmt  = $("f-output-format").value;
+  const sel  = $("f-depth-index");
+  if (fmt === MIXED) {
+    // Format itself differs across the selection — we can't know which depth
+    // list applies, so just show a single mixed entry until a format is picked.
+    sel.innerHTML = `<option value="${MIXED}">— mixed —</option>`;
+    sel.value = MIXED;
+    sel.disabled = false;
+    $("f-alpha-row").hidden = false;
+    markMixed(sel, true);
+    return;
+  }
+  const opts = DEPTH_OPTS[fmt] || DEPTH_OPTS.jpg;
+  const prevMixed = desiredDepthIndex === MIXED;
+  // No arg → user just changed format; keep the current index if it's a real
+  // number, else fall back to 0 (e.g. when leaving the mixed state).
+  let prev;
+  if (prevMixed) prev = 0;
+  else if (desiredDepthIndex != null) prev = desiredDepthIndex;
+  else { const cur = Number(sel.value); prev = Number.isFinite(cur) ? cur : 0; }
+  let html = opts.map((label, i) => `<option value="${i}">${esc(label)}</option>`).join("");
+  if (prevMixed) html = `<option value="${MIXED}">— mixed —</option>` + html;
+  sel.innerHTML = html;
+  sel.value = prevMixed ? MIXED : String(Math.min(Math.max(prev, 0), opts.length - 1));
+  sel.disabled = (fmt === "jpg") && !prevMixed;    // jpg depth is fixed
+  $("f-alpha-row").hidden = (fmt === "jpg");        // jpg has no alpha channel
+  markMixed(sel, prevMixed);
+}
+
+// Visually flag a control as holding mixed values (a dashed/idle look via CSS).
+function markMixed(el, isMixed) { el.classList.toggle("mixed", !!isMixed); }
+
+// Prefill one checkbox from N job values: checked/unchecked if all agree,
+// else indeterminate (the "dash"). Records mixedness on the element.
+function fillCheck(id, values) {
+  const el = $(id);
+  const same = allSame(values);
+  el.indeterminate = !same;
+  el.checked = same ? !!values[0] : false;
+  el.dataset.mixed = same ? "" : "1";
+}
+
+// Prefill a text/number input: the shared value if all agree, else blank with a
+// "— mixed —" placeholder and the .mixed flag.
+function fillInput(id, values, toStr) {
+  const el = $(id);
+  const same = allSame(values.map(String));
+  if (same) {
+    el.value = toStr ? toStr(values[0]) : (values[0] ?? "");
+    el.placeholder = "";
+    el.dataset.mixed = "";
+    markMixed(el, false);
+  } else {
+    el.value = "";
+    el.placeholder = "— mixed —";
+    el.dataset.mixed = "1";
+    markMixed(el, true);
+  }
+}
+
+// Prefill a <select>: select the shared value if all agree, else prepend a
+// synthetic "— mixed —" option and select it.
+function fillSelect(id, values) {
+  const el = $(id);
+  // Drop any stale mixed option from a previous open.
+  const stale = el.querySelector(`option[value="${MIXED}"]`);
+  if (stale) stale.remove();
+  const same = allSame(values.map(String));
+  if (same) {
+    el.value = String(values[0]);
+    el.dataset.mixed = "";
+    markMixed(el, false);
+  } else {
+    el.insertBefore(new Option("— mixed —", MIXED), el.firstChild);
+    el.value = MIXED;
+    el.dataset.mixed = "1";
+    markMixed(el, true);
+  }
+}
+
+// Open the editor for the entire current selection (the "Edit Selected" button).
+function actEditSelected() {
+  const ids = Array.from(selectedJobIds);
+  if (!ids.length) return;
+  openEditModal(ids[0]);   // primaryId is in the selection → edits all of it
+}
+
+function openEditModal(primaryId) {
+  // Edit the whole current selection if the clicked row is part of it;
+  // otherwise edit just the clicked row.
+  let ids = Array.from(selectedJobIds);
+  if (!ids.includes(primaryId)) ids = [primaryId];
+
+  const jobs = ids.map(findJob).filter(Boolean);
+  if (!jobs.length) { toast("Job no longer exists.", true); return; }
+  ids = jobs.map((j) => j.job_id);
+
+  editingJobIds = ids;   // suspends polling via loadData()'s guard
+  editTouched.clear();
+  const multi = jobs.length > 1;
+
+  $("edit-title").textContent = multi
+    ? `Edit ${jobs.length} Jobs`
+    : `Edit Job · ${jobs[0].scene_name || ids[0]}`;
+
+  // Warn (but don't block) about non-queued jobs: edits only take effect on
+  // requeue. With a mixed selection, count how many are affected.
+  const nonQueued = jobs.filter((j) => (j.status || "").toLowerCase() !== "queued");
+  const warn = $("edit-warn");
+  if (nonQueued.length) {
+    warn.textContent = multi
+      ? `${nonQueued.length} of ${jobs.length} selected job(s) are not queued. Changes are saved but only take effect for those once you requeue them.`
+      : `This job is "${jobs[0].status}". Changes are saved but only take effect if you requeue it.`;
+    warn.hidden = false;
+  } else {
+    warn.hidden = true;
+  }
+
+  const R = (k) => jobs.map((j) => (j.render || {})[k]);
+  const O = (k) => jobs.map((j) => (j.output || {})[k]);
+
+  // Render fields.
+  fillInput("f-resolution",  R("resolution"));
+  fillInput("f-pass-limit",  R("pass_limit"));
+  fillInput("f-noise-limit", R("noise_limit"));
+  fillSelect("f-camera-mode", R("fallback_camera_mode").map((v) => (v === "active") ? "active" : "all"));
+  fillCheck("f-use-variations",    R("use_variations").map(Boolean));
+  fillCheck("f-override-settings", R("override_settings").map(Boolean));
+  syncOverrideBlock();
+
+  // Output fields. version null → "" (the "None" option).
+  fillInput("f-output-folder", O("folder").map((v) => v || ""));
+  const versionSel = $("f-output-version");
+  const versions = O("version").map((v) => (v == null) ? "" : String(v));
+  // Add any custom version labels not already listed so they can be shown.
+  for (const v of versions) {
+    if (v && !Array.from(versionSel.options).some((opt) => opt.value === v)) {
+      versionSel.add(new Option(v, v));
+    }
+  }
+  fillSelect("f-output-version", versions);
+
+  const formats = O("format").map((v) => v || "jpg");
+  fillSelect("f-output-format", formats);
+  // Depth list depends on format; pass MIXED through when either differs.
+  const depthVals = O("depth_index").map((v) => v ?? 0);
+  const depthArg = !allSame(formats) ? MIXED
+                 : !allSame(depthVals.map(String)) ? MIXED
+                 : depthVals[0];
+  syncFormatDependents(depthArg);
+
+  fillCheck("f-save-alpha", O("save_alpha").map(Boolean));
+  fillCheck("f-save-re",    O("save_render_elements").map(Boolean));
+
+  $("edit-overlay").hidden = false;
+  $("f-output-folder").focus();
+}
+
+function closeEditModal() {
+  if (!editingJobIds.length) return;
+  editingJobIds = [];
+  $("edit-overlay").hidden = true;
+  loadData();   // resume: pull a fresh snapshot we may have skipped while open
+}
+
+// A checkbox should be written only when it holds a definite value: either it
+// was never mixed, or the user clicked it (clearing indeterminate). A still-
+// indeterminate box means "leave each job's own value alone".
+function checkVal(id) {
+  const el = $(id);
+  return el.indeterminate ? undefined : el.checked;
+}
+
+// A select/input value to write, or undefined to skip. Skips the synthetic
+// mixed option and untouched mixed inputs.
+function pickVal(id, transform) {
+  const el = $(id);
+  const wasMixed = el.dataset.mixed === "1";
+  // Mixed + untouched → skip (preserve per-job values).
+  if (wasMixed && !editTouched.has(id)) return undefined;
+  const raw = el.value;
+  if (raw === MIXED) return undefined;
+  return transform ? transform(raw) : raw;
+}
+
+// Build the sparse {render, output} body: omit any field we must not write.
+function computeSave() {
+  const render = {};
+  const output = {};
+  const set = (obj, key, val) => { if (val !== undefined) obj[key] = val; };
+
+  set(render, "resolution",  pickVal("f-resolution",  (v) => v.trim() === "" ? undefined : Number(v)));
+  set(render, "pass_limit",  pickVal("f-pass-limit",  (v) => v.trim() === "" ? undefined : Number(v)));
+  set(render, "noise_limit", pickVal("f-noise-limit", (v) => v.trim() === "" ? undefined : Number(v)));
+  set(render, "fallback_camera_mode", pickVal("f-camera-mode"));
+  set(render, "use_variations",    checkVal("f-use-variations"));
+  set(render, "override_settings", checkVal("f-override-settings"));
+
+  set(output, "folder",  pickVal("f-output-folder", (v) => v.trim()));
+  set(output, "version", pickVal("f-output-version", (v) => v === "" ? null : v));
+  set(output, "format",  pickVal("f-output-format"));
+  set(output, "depth_index", pickVal("f-depth-index", (v) => Number(v)));
+  set(output, "save_alpha",           checkVal("f-save-alpha"));
+  set(output, "save_render_elements", checkVal("f-save-re"));
+
+  const body = {};
+  if (Object.keys(render).length) body.render = render;
+  if (Object.keys(output).length) body.output = output;
+  return body;
+}
+
+async function saveEditModal() {
+  if (!editingJobIds.length) return;
+  const ids = editingJobIds;
+  const changes = computeSave();
+
+  if (!changes.render && !changes.output) {
+    toast("No changes to apply.");
+    closeEditModal();
+    return;
+  }
+
+  const body = (ids.length === 1)
+    ? { job_id: ids[0], ...changes }
+    : { job_ids: ids, ...changes };
+
+  const saveBtn = $("edit-save");
+  saveBtn.disabled = true;
+  try {
+    const r = await postAdmin("/admin/jobs/update", body);
+    // Drop the polling guard *before* the refresh so loadData() runs.
+    editingJobIds = [];
+    $("edit-overlay").hidden = true;
+    const n = (r && r.count != null) ? r.count : ids.length;
+    toast(n > 1 ? `Updated ${n} jobs.` : "Job updated.");
+    await loadData();
+  } catch (e) {
+    toast("Update failed: " + e.message, true);
+  } finally {
+    saveBtn.disabled = false;
+  }
+}
+
+// Mark a control as user-touched (so a previously-mixed field gets written) and
+// drop its mixed styling.
+function onEditFieldInput(ev) {
+  const el = ev.target;
+  if (!el.id || !el.id.startsWith("f-")) return;
+  editTouched.add(el.id);
+  el.dataset.mixed = "";
+  markMixed(el, false);
+}
+
+function onEditOverlayClick(ev) {
+  // Click on the dimmed backdrop (not the modal card itself) closes the modal.
+  if (ev.target === $("edit-overlay")) closeEditModal();
+}
+
+function onKeydown(ev) {
+  if (ev.key === "Escape" && editingJobIds.length) closeEditModal();
+}
+
 // ── Event wiring ──────────────────────────────────────────────────────────────
 
 function rowIdOrder() {
@@ -838,6 +1154,13 @@ function onTbodyClick(ev) {
         toast(ok ? "Output path copied — paste into Explorer" : "Copy failed", !ok)
       );
     }
+    return;
+  }
+
+  // Edit button: open the modal and bail, never affects row selection.
+  const editBtn = ev.target.closest(".edit-btn");
+  if (editBtn) {
+    openEditModal(editBtn.getAttribute("data-edit") || "");
     return;
   }
 
@@ -990,6 +1313,19 @@ function wire() {
   $("perf-status").addEventListener("change", onPerfFilterChange);
   $("perf-window").addEventListener("change", onPerfFilterChange);
   $("job-tabs").addEventListener("click", onJobTabClick);
+  $("btn-edit-sel").addEventListener("click", actEditSelected);
+  $("edit-close").addEventListener("click", closeEditModal);
+  $("edit-cancel").addEventListener("click", closeEditModal);
+  $("edit-save").addEventListener("click", saveEditModal);
+  $("edit-overlay").addEventListener("click", onEditOverlayClick);
+  // Any field interaction marks it touched (so a previously-mixed field is
+  // written on save). Delegated so it covers every f-* control. input fires
+  // for text/number; change fires for checkbox/select.
+  $("edit-overlay").addEventListener("input", onEditFieldInput);
+  $("edit-overlay").addEventListener("change", onEditFieldInput);
+  $("f-override-settings").addEventListener("change", syncOverrideBlock);
+  $("f-output-format").addEventListener("change", () => syncFormatDependents());
+  document.addEventListener("keydown", onKeydown);
 }
 
 wire();

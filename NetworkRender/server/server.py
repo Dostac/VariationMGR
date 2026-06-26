@@ -673,6 +673,75 @@ class JobServerState:
                 self.save()
         return changed
 
+    def update_job_fields(self, job_id, render_changes=None, output_changes=None):
+        """Edit the render/output settings of a single already-submitted job.
+
+        Only the render and output sub-dicts are editable; the scene file,
+        variation/csv overrides, render range, status and queue position are
+        left untouched. The merged scene_job is re-run through the schema
+        normalizer so every value stays valid and internally consistent
+        (e.g. an out-of-range format falls back to jpg) exactly as it would
+        on a fresh submit.
+
+        Returns the updated job copy, or None if the job no longer exists.
+        Status is intentionally not changed: editing a done/running job only
+        takes effect once it is requeued, which the dashboard warns about.
+        """
+        render_changes = render_changes if isinstance(render_changes, dict) else {}
+        output_changes = output_changes if isinstance(output_changes, dict) else {}
+        with self.lock:
+            job = self.jobs.get(job_id)
+            if not job:
+                return None
+
+            scene_job = copy.deepcopy(job.get("scene_job", {}) or {})
+            if render_changes:
+                merged_render = dict(scene_job.get("render", {}) or {})
+                merged_render.update(render_changes)
+                scene_job["render"] = merged_render
+            if output_changes:
+                merged_output = dict(scene_job.get("output", {}) or {})
+                merged_output.update(output_changes)
+                scene_job["output"] = merged_output
+
+            job["scene_job"] = schema.normalize_job_request(scene_job)
+            job["updated_at"] = utc_now()
+            self.save()
+            return copy.deepcopy(job)
+
+    def update_jobs_fields(self, job_ids, render_changes=None, output_changes=None):
+        """Apply the same sparse render/output changes to several jobs at once.
+
+        The change dicts are sparse on purpose: only the keys present are
+        overwritten, so a multi-select edit that leaves a field untouched
+        (because it differed across the selection) preserves each job's own
+        value for that field. Per-job merge + normalize is identical to
+        update_job_fields. Returns the list of job ids actually updated.
+        """
+        render_changes = render_changes if isinstance(render_changes, dict) else {}
+        output_changes = output_changes if isinstance(output_changes, dict) else {}
+        updated = []
+        with self.lock:
+            for job_id in job_ids:
+                job = self.jobs.get(job_id)
+                if not job:
+                    continue
+                scene_job = copy.deepcopy(job.get("scene_job", {}) or {})
+                if render_changes:
+                    merged_render = dict(scene_job.get("render", {}) or {})
+                    merged_render.update(render_changes)
+                    scene_job["render"] = merged_render
+                if output_changes:
+                    merged_output = dict(scene_job.get("output", {}) or {})
+                    merged_output.update(output_changes)
+                    scene_job["output"] = merged_output
+                job["scene_job"] = schema.normalize_job_request(scene_job)
+                job["updated_at"] = utc_now()
+                updated.append(job_id)
+            if updated:
+                self.save()
+        return updated
+
     def remove_jobs_by_status(self, statuses):
         with self.lock:
             statuses = {str(s).strip().lower() for s in (statuses or []) if str(s).strip()}
@@ -823,7 +892,9 @@ def build_dashboard_payload(server):
     for j in jobs:
         scene_job = j.get("scene_job", {}) or {}
         scene_path = str(scene_job.get("scene_file", "") or "")
-        output_folder = str((scene_job.get("output", {}) or {}).get("folder", "") or "")
+        render_settings = scene_job.get("render", {}) or {}
+        output_settings = scene_job.get("output", {}) or {}
+        output_folder = str(output_settings.get("folder", "") or "")
         claimed_by = str(j.get("claimed_by") or "")
         worker_label = ""
         if claimed_by:
@@ -857,6 +928,24 @@ def build_dashboard_payload(server):
             "last_error": j.get("last_error", "") or "",
             "queue_position": queue_pos.get(str(j.get("job_id", ""))),
             "frozen": bool(j.get("frozen")),
+            # Current editable settings, so the dashboard's edit modal can
+            # prefill without a second round-trip to GET /jobs/{id}.
+            "render": {
+                "override_settings": bool(render_settings.get("override_settings", False)),
+                "resolution": int(render_settings.get("resolution", 4000) or 0),
+                "pass_limit": int(render_settings.get("pass_limit", 75) or 0),
+                "noise_limit": float(render_settings.get("noise_limit", 6.0) or 0.0),
+                "use_variations": bool(render_settings.get("use_variations", True)),
+                "fallback_camera_mode": str(render_settings.get("fallback_camera_mode", "all") or "all"),
+            },
+            "output": {
+                "folder": output_folder,
+                "version": output_settings.get("version"),
+                "format": str(output_settings.get("format", "jpg") or "jpg"),
+                "depth_index": int(output_settings.get("depth_index", 0) or 0),
+                "save_alpha": bool(output_settings.get("save_alpha", False)),
+                "save_render_elements": bool(output_settings.get("save_render_elements", False)),
+            },
         })
 
     # Rolling average over the most recent N completed jobs. Using the most
@@ -1194,6 +1283,51 @@ class RequestHandler(BaseHTTPRequestHandler):
                 frozen = bool(payload_dict.get("frozen", True))
                 changed = self.server.state.set_jobs_frozen([str(j) for j in job_ids], frozen)
                 self._json(HTTPStatus.OK, {"changed": changed, "count": len(changed), "frozen": frozen})
+                return
+
+            if path == "/admin/jobs/update":
+                # Accept a single job_id or a job_ids list. The render/output
+                # change dicts are sparse: only keys present are written, which
+                # is how a multi-select edit leaves "mixed" fields untouched.
+                render_changes = payload_dict.get("render")
+                output_changes = payload_dict.get("output")
+                if render_changes is not None and not isinstance(render_changes, dict):
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "render must be an object"})
+                    return
+                if output_changes is not None and not isinstance(output_changes, dict):
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "output must be an object"})
+                    return
+
+                raw_ids = payload_dict.get("job_ids")
+                if raw_ids is not None:
+                    if not isinstance(raw_ids, list):
+                        self._json(HTTPStatus.BAD_REQUEST, {"error": "job_ids must be a list"})
+                        return
+                    job_ids = [str(j).strip() for j in raw_ids if str(j).strip()]
+                    if not job_ids:
+                        self._json(HTTPStatus.BAD_REQUEST, {"error": "job_ids is empty"})
+                        return
+                    updated = self.server.state.update_jobs_fields(
+                        job_ids,
+                        render_changes=render_changes,
+                        output_changes=output_changes,
+                    )
+                    self._json(HTTPStatus.OK, {"ok": True, "updated": updated, "count": len(updated)})
+                    return
+
+                job_id = str(payload_dict.get("job_id", "") or "").strip()
+                if not job_id:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "job_id is required"})
+                    return
+                job = self.server.state.update_job_fields(
+                    job_id,
+                    render_changes=render_changes,
+                    output_changes=output_changes,
+                )
+                if not job:
+                    self._json(HTTPStatus.NOT_FOUND, {"error": "job_not_found"})
+                    return
+                self._json(HTTPStatus.OK, {"ok": True, "job": job, "updated": [job_id], "count": 1})
                 return
 
             if path == "/admin/jobs/remove":

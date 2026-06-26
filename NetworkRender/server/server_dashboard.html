@@ -154,6 +154,7 @@
 
       <!-- Action buttons row -->
       <div class="jobs-actions" style="margin-bottom:10px">
+        <button class="btn" id="btn-edit-sel" disabled>Edit Selected</button>
         <button class="btn" id="btn-requeue-sel" disabled>Requeue Selected</button>
         <button class="btn" id="btn-freeze-sel" disabled>Freeze Selected</button>
         <button class="btn" id="btn-unfreeze-sel" disabled>Unfreeze Selected</button>
@@ -177,14 +178,116 @@
             <th>Att.</th>
             <th>Updated</th>
             <th>Last Error</th>
+            <th class="col-edit"></th>
           </tr>
         </thead>
         <tbody id="tbody-jobs">
-          <tr><td colspan="9" class="empty">Loading…</td></tr>
+          <tr><td colspan="10" class="empty">Loading…</td></tr>
         </tbody>
       </table>
       <div class="foot" id="jobs-foot">—</div>
     </section>
+
+    <!-- ── Edit job modal ────────────────────────────────────────────── -->
+    <div id="edit-overlay" class="modal-overlay" hidden>
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="edit-title">
+        <div class="modal-head">
+          <h3 id="edit-title">Edit Job</h3>
+          <button class="modal-close" id="edit-close" aria-label="Close">&times;</button>
+        </div>
+
+        <div class="modal-warn" id="edit-warn" hidden></div>
+
+        <div class="modal-body">
+          <!-- Section order mirrors the 3ds Max Batch Renderer UI
+               (batchrenderer_UI.py): Output & Naming, Render Settings,
+               Format Configuration. -->
+          <fieldset class="form-section">
+            <legend class="form-section-title">Output &amp; Naming</legend>
+            <div class="form-row">
+              <label class="field-label" for="f-output-folder">Folder:</label>
+              <input type="text" id="f-output-folder" class="input" spellcheck="false">
+            </div>
+            <div class="form-row">
+              <label class="field-label" for="f-output-version">Version:</label>
+              <select id="f-output-version" class="select">
+                <option value="">None</option>
+                <option value="V1">V1</option>
+                <option value="V2">V2</option>
+                <option value="V3">V3</option>
+                <option value="V4">V4</option>
+                <option value="V5">V5</option>
+                <option value="V6">V6</option>
+                <option value="V7">V7</option>
+                <option value="V8">V8</option>
+                <option value="V9">V9</option>
+                <option value="V10">V10</option>
+              </select>
+            </div>
+          </fieldset>
+
+          <fieldset class="form-section">
+            <legend class="form-section-title">Render Settings</legend>
+            <label class="toggle"><input type="checkbox" id="f-override-settings"> Override scene render settings</label>
+            <!-- Collapsible block: visible only when override is on, exactly
+                 like widget_settings in the batch renderer. -->
+            <div class="form-indent" id="f-settings-block" hidden>
+              <div class="form-row">
+                <label class="field-label" for="f-resolution">Longest Side:</label>
+                <div class="input-suffix"><input type="number" id="f-resolution" min="100" max="30000" step="1" class="input"><span class="suffix">px</span></div>
+              </div>
+              <div class="form-row">
+                <label class="field-label" for="f-pass-limit">Pass Limit:</label>
+                <input type="number" id="f-pass-limit" min="0" max="10000" step="1" class="input">
+              </div>
+              <div class="form-row">
+                <label class="field-label" for="f-noise-limit">Noise Limit:</label>
+                <div class="input-suffix"><input type="number" id="f-noise-limit" min="0" max="100" step="0.5" class="input"><span class="suffix">%</span></div>
+              </div>
+            </div>
+            <div class="form-row">
+              <label class="field-label" for="f-camera-mode">Fallback Camera Mode:</label>
+              <select id="f-camera-mode" class="select">
+                <option value="all">Render All Cameras</option>
+                <option value="active">Render Active View Only</option>
+              </select>
+            </div>
+          </fieldset>
+
+          <fieldset class="form-section">
+            <legend class="form-section-title">VariationMGR Integration</legend>
+            <label class="toggle"><input type="checkbox" id="f-use-variations"> Use VariationMGR scene data</label>
+            <div class="field-hint">When enabled, camera mode and output naming are driven by the VariationManagerData embedded in each scene file. If no data is found the Fallback Camera Mode above is used.</div>
+          </fieldset>
+
+          <fieldset class="form-section">
+            <legend class="form-section-title">Format Configuration</legend>
+            <div class="form-row">
+              <label class="field-label" for="f-output-format">Format:</label>
+              <select id="f-output-format" class="select">
+                <option value="jpg">jpg</option>
+                <option value="png">png</option>
+                <option value="tif">tif</option>
+                <option value="exr">exr</option>
+              </select>
+            </div>
+            <div class="form-row">
+              <label class="field-label" for="f-depth-index">Bit Depth:</label>
+              <select id="f-depth-index" class="select"></select>
+            </div>
+            <div class="form-checks">
+              <label class="toggle" id="f-alpha-row"><input type="checkbox" id="f-save-alpha"> Save Alpha Channel</label>
+              <label class="toggle"><input type="checkbox" id="f-save-re"> Save Render Elements</label>
+            </div>
+          </fieldset>
+        </div>
+
+        <div class="modal-foot">
+          <button class="btn" id="edit-cancel">Cancel</button>
+          <button class="btn btn-primary" id="edit-save">Save</button>
+        </div>
+      </div>
+    </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
   </div>

@@ -867,6 +867,241 @@ tbody tr.selected:hover td { background: rgba(121,192,255,0.16); }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
 .toast.error { border-color: var(--red); color: var(--red); background: var(--red-bg); }
 
+/* ── Edit job: row button + modal ────────────────────────────────────────── */
+
+.col-edit {
+  width: 30px;
+  padding-left: 2px;
+  padding-right: 9px;
+  text-align: right;
+  white-space: nowrap;
+}
+
+/* Pencil button mirrors .copy-btn so the two row actions look like a set. */
+.edit-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 0.1s, border-color 0.1s, color 0.1s;
+}
+
+.edit-btn:hover {
+  background: var(--bg-card);
+  border-color: var(--border-hi);
+  color: var(--text);
+}
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 120;            /* above the toast (100) */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(1, 4, 9, 0.66);
+  backdrop-filter: blur(2px);
+}
+
+.modal-overlay[hidden] { display: none; }
+
+.modal {
+  width: min(560px, 100%);
+  max-height: calc(100vh - 40px);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-section);
+  border: 1px solid var(--border-hi);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6);
+  overflow: hidden;
+}
+
+.modal-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 13px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.modal-head h3 {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.modal-close {
+  margin-left: auto;
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 1.2rem;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.1s, border-color 0.1s, color 0.1s;
+}
+.modal-close:hover { background: var(--bg-card); border-color: var(--border-hi); color: var(--text); }
+
+.modal-warn {
+  margin: 12px 16px 0;
+  padding: 8px 11px;
+  border: 1px solid var(--orange);
+  border-radius: var(--radius);
+  background: var(--orange-bg);
+  color: var(--orange);
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+.modal-warn[hidden] { display: none; }
+
+.modal-body {
+  padding: 14px 16px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* Each section is a bordered group with a title, like the batch renderer's
+   QGroupBox panels. */
+.form-section {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px 14px;
+  margin: 0;
+  min-width: 0;
+}
+
+.form-section-title {
+  padding: 0 6px;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+/* Label-left / control-right rows, mirroring QFormLayout addRow(). */
+.form-row {
+  display: grid;
+  grid-template-columns: 130px 1fr;
+  align-items: center;
+  gap: 10px;
+  margin-top: 9px;
+}
+
+.field-label {
+  font-size: 0.8125rem;
+  color: var(--text-muted);
+  text-align: left;
+}
+
+/* Indented collapsible block (override-gated render settings). */
+.form-indent {
+  margin-left: 14px;
+  padding-left: 2px;
+}
+.form-indent[hidden] { display: none; }
+
+.field-hint {
+  margin-top: 6px;
+  font-size: 0.72rem;
+  font-style: italic;
+  color: var(--text-dim);
+  line-height: 1.45;
+}
+
+/* Number input with a trailing unit (px, %). */
+.input-suffix {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.input-suffix .input { flex: 1; min-width: 0; }
+.input-suffix .suffix {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+/* Text/number inputs styled to match .select */
+.input {
+  min-height: 28px;
+  padding: 0 8px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--text);
+  font-size: 0.8125rem;
+  font-family: inherit;
+  width: 100%;
+}
+.input:focus, .modal-body .select:focus {
+  outline: none;
+  border-color: var(--blue);
+}
+
+.modal-body .select { min-height: 28px; width: 100%; }
+.modal-body .select:disabled { opacity: 0.55; cursor: not-allowed; }
+
+.form-checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  margin-top: 10px;
+}
+.form-checks .toggle[hidden] { display: none; }
+
+/* Mixed-value affordance for a multi-select edit: a field whose value differs
+   across the selection shows a dashed border + muted text until the user
+   commits a value. The "— mixed —" placeholder/option carries the meaning. */
+.input.mixed, .modal-body .select.mixed {
+  border-style: dashed;
+  border-color: var(--border-hi);
+  color: var(--text-muted);
+}
+.input.mixed::placeholder { color: var(--text-muted); font-style: italic; }
+
+/* Indeterminate checkbox = the "dash": values differ across the selection.
+   accent-color already themes the box; the browser draws the dash glyph. */
+.toggle input[type="checkbox"]:indeterminate { accent-color: var(--text-muted); }
+
+/* Override checkbox sits flush above its indented block. */
+.form-section > .toggle { margin-bottom: 2px; }
+
+.modal-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+}
+
+.btn-primary {
+  background: var(--blue-bg);
+  color: var(--blue);
+  border-color: var(--blue);
+}
+.btn-primary:hover:not(:disabled) { background: rgba(121, 192, 255, 0.2); }
+
 /* ── Responsive ──────────────────────────────────────────────────────────── */
 
 @media (max-width: 1050px) {
@@ -885,4 +1120,5 @@ tbody tr.selected:hover td { background: rgba(121,192,255,0.16); }
   .panel { padding: 12px 14px; }
   th, td { padding-left: 7px; padding-right: 7px; }
   .topbar .pill-row { margin-left: 0; }
+  .form-row { grid-template-columns: 1fr; gap: 4px; align-items: start; }
 }
