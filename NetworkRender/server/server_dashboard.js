@@ -415,17 +415,10 @@ function renderJobs(jobs) {
   updateSelectionUI(shown.length);
 }
 
-function updateSelectionUI(visibleCount) {
+// What actions the current selection supports. Drives which context-menu items
+// are enabled. Freeze/unfreeze only apply to queued jobs (frozen vs not).
+function selectionCaps() {
   const n = selectedJobIds.size;
-  $("btn-edit-sel").disabled    = n === 0;
-  $("btn-requeue-sel").disabled = n === 0;
-  $("btn-remove-sel").disabled  = n === 0;
-  $("btn-edit-sel").textContent    = n > 1 ? `Edit Selected (${n})`    : "Edit Selected";
-  $("btn-requeue-sel").textContent = n > 1 ? `Requeue Selected (${n})` : "Requeue Selected";
-  $("btn-remove-sel").textContent  = n > 1 ? `Remove Selected (${n})`  : "Remove Selected";
-
-  // Freeze/unfreeze only apply to queued jobs; enable each only when the
-  // selection contains a job it can actually act on.
   let freezable = 0, unfreezable = 0;
   if (lastSnapshot) {
     const byId = new Map((lastSnapshot.jobs || []).map((j) => [j.job_id, j]));
@@ -435,11 +428,13 @@ function updateSelectionUI(visibleCount) {
       if (j.frozen) unfreezable++; else freezable++;
     }
   }
-  $("btn-freeze-sel").disabled   = freezable === 0;
-  $("btn-unfreeze-sel").disabled = unfreezable === 0;
-  $("btn-freeze-sel").textContent   = freezable   > 1 ? `Freeze Selected (${freezable})`     : "Freeze Selected";
-  $("btn-unfreeze-sel").textContent = unfreezable > 1 ? `Unfreeze Selected (${unfreezable})` : "Unfreeze Selected";
+  return { count: n, freezable, unfreezable };
 }
+
+// Selection actions now live in the right-click context menu, so there are no
+// per-selection buttons to toggle here. Kept as a no-op hook (renderJobs and the
+// selection handlers still call it) in case bar-level selection UI returns.
+function updateSelectionUI(visibleCount) {}
 
 // ── Main load ────────────────────────────────────────────────────────────────
 
@@ -1126,7 +1121,103 @@ function onEditOverlayClick(ev) {
 }
 
 function onKeydown(ev) {
-  if (ev.key === "Escape" && editingJobIds.length) closeEditModal();
+  if (ev.key !== "Escape") return;
+  if (!ctxMenuEl().hidden) { closeCtxMenu(); return; }
+  if (editingJobIds.length) closeEditModal();
+}
+
+// ── Job row context menu (right-click) ─────────────────────────────────────────
+
+// The job id the menu currently targets (for the single-row "Copy output path").
+let ctxRowId = null;
+
+function ctxMenuEl() { return $("ctx-menu"); }
+
+function closeCtxMenu() {
+  const m = ctxMenuEl();
+  if (!m.hidden) m.hidden = true;
+  ctxRowId = null;
+}
+
+// Right-click on a job row. Smart selection: if the row is already selected the
+// menu acts on the whole selection; otherwise select just this row first.
+function onTbodyContextMenu(ev) {
+  const tr = ev.target.closest("tr[data-job-id]");
+  if (!tr) return;                 // not a job row → leave native menu alone
+  const id = tr.getAttribute("data-job-id");
+  if (!id) return;
+  ev.preventDefault();             // suppress the WebView2/browser native menu
+
+  if (!selectedJobIds.has(id)) {
+    selectedJobIds.clear();
+    selectedJobIds.add(id);
+    selectionAnchorId = id;
+    applySelectionClasses();
+  }
+  ctxRowId = id;
+  openCtxMenu(ev.clientX, ev.clientY);
+}
+
+function openCtxMenu(x, y) {
+  const m = ctxMenuEl();
+  const caps = selectionCaps();
+  const multi = caps.count > 1;
+
+  // Enable/disable items by what the selection supports (greyed, not hidden,
+  // so the menu shape stays stable).
+  const setEnabled = (action, on) => {
+    const el = m.querySelector(`[data-action="${action}"]`);
+    if (el) el.disabled = !on;
+  };
+  setEnabled("edit",     caps.count > 0);
+  setEnabled("requeue",  caps.count > 0);
+  setEnabled("freeze",   caps.freezable > 0);
+  setEnabled("unfreeze", caps.unfreezable > 0);
+  setEnabled("remove",   caps.count > 0);
+  // Copy output path is single-row only and needs an output folder to copy.
+  setEnabled("copy", !multi && !!ctxCopyPath());
+
+  // Show first (so we can measure), then clamp inside the viewport.
+  m.hidden = false;
+  const rect = m.getBoundingClientRect();
+  const pad = 6;
+  const left = Math.min(x, window.innerWidth  - rect.width  - pad);
+  const top  = Math.min(y, window.innerHeight - rect.height - pad);
+  m.style.left = Math.max(pad, left) + "px";
+  m.style.top  = Math.max(pad, top) + "px";
+}
+
+// Output path (Windows-native) for the menu's target row, or "" if none.
+function ctxCopyPath() {
+  if (!ctxRowId) return "";
+  const tr = $("tbody-jobs").querySelector(`tr[data-job-id="${ctxRowId}"]`);
+  const btn = tr && tr.querySelector(".copy-btn");
+  return btn ? toNativePath(btn.getAttribute("data-copy") || "") : "";
+}
+
+function onCtxMenuClick(ev) {
+  const item = ev.target.closest(".ctx-item");
+  if (!item || item.disabled) return;
+  const action = item.getAttribute("data-action");
+  const targetRow = ctxRowId;     // capture before close clears it
+  closeCtxMenu();
+  switch (action) {
+    case "edit":     actEditSelected(); break;
+    case "requeue":  actRequeueSelected(); break;
+    case "freeze":   actSetFrozenSelected(true); break;
+    case "unfreeze": actSetFrozenSelected(false); break;
+    case "remove":   actRemoveSelected(); break;
+    case "copy": {
+      const tr = $("tbody-jobs").querySelector(`tr[data-job-id="${targetRow}"]`);
+      const btn = tr && tr.querySelector(".copy-btn");
+      const native = btn ? toNativePath(btn.getAttribute("data-copy") || "") : "";
+      if (native) {
+        copyText(native).then((ok) =>
+          toast(ok ? "Output path copied — paste into Explorer" : "Copy failed", !ok));
+      }
+      break;
+    }
+  }
 }
 
 // ── Event wiring ──────────────────────────────────────────────────────────────
@@ -1295,14 +1386,11 @@ function onJobTabClick(ev) {
 
 function wire() {
   $("tbody-jobs").addEventListener("click", onTbodyClick);
+  $("tbody-jobs").addEventListener("contextmenu", onTbodyContextMenu);
   $("tbody-jobs").addEventListener("dragstart", onDragStart);
   $("tbody-jobs").addEventListener("dragover", onDragOver);
   $("tbody-jobs").addEventListener("drop", onDrop);
   $("tbody-jobs").addEventListener("dragend", onDragEnd);
-  $("btn-requeue-sel").addEventListener("click", actRequeueSelected);
-  $("btn-freeze-sel").addEventListener("click", () => actSetFrozenSelected(true));
-  $("btn-unfreeze-sel").addEventListener("click", () => actSetFrozenSelected(false));
-  $("btn-remove-sel").addEventListener("click", actRemoveSelected);
   $("btn-clear-queue").addEventListener("click", actClearQueue);
   $("btn-remove-done").addEventListener("click", actRemoveDone);
   $("btn-remove-failed").addEventListener("click", actRemoveFailed);
@@ -1313,7 +1401,14 @@ function wire() {
   $("perf-status").addEventListener("change", onPerfFilterChange);
   $("perf-window").addEventListener("change", onPerfFilterChange);
   $("job-tabs").addEventListener("click", onJobTabClick);
-  $("btn-edit-sel").addEventListener("click", actEditSelected);
+  // Context menu: act on item click; dismiss on any click-away, scroll,
+  // resize, another right-click outside it, or Escape.
+  $("ctx-menu").addEventListener("click", onCtxMenuClick);
+  document.addEventListener("mousedown", (ev) => {
+    if (!ev.target.closest("#ctx-menu")) closeCtxMenu();
+  });
+  document.addEventListener("scroll", closeCtxMenu, true);
+  window.addEventListener("resize", closeCtxMenu);
   $("edit-close").addEventListener("click", closeEditModal);
   $("edit-cancel").addEventListener("click", closeEditModal);
   $("edit-save").addEventListener("click", saveEditModal);

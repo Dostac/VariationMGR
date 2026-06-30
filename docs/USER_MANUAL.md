@@ -33,12 +33,14 @@ The next row might mean:
 - cool wall color
 - camera `Cam_Livingroom_02`
 
-VariationMGR applies those row values to the scene. The Batch Renderer turns those rows into renders. The Server and Workers let multiple machines share the work across your local network.
+VariationMGR applies those row values to the scene using operators. The Batch Renderer turns those rows into renders. The Server and Workers let multiple machines share the work across your local network.
 
 That means the suite can be used in two very different ways:
 
 1. As a true variation pipeline for options, finishes, layouts, XRefs, colors, and cameras.
 2. As a clean batch renderer for many `.max` files, even if you do not use variations at all.
+
+Both paths can take advantage of the network rendering capabilites if you have multiple machines available. It is important that the 3ds max installations between these machines is identical, and you cannot use a node license. you need a full license for 3ds max. Any plugin you might use that provides render node licences might work fine, but it cannot be guarantueed.
 
 ## The Four Main Parts
 
@@ -75,19 +77,18 @@ It receives jobs, tracks progress, and hands work to workers.
 
 A worker is a render machine that connects to the server, claims jobs, and renders them.
 
-If you only render locally, you may never need the server and worker at all.
+If you only render locally on your own machine (you only have 1 computer), you may never need the server and worker at all.
 
 ## The Big-Picture Workflow
 
 Most teams will use the suite in this order:
 
 1. Build and test the variation setup in `VariationMGR`.
-2. Save the variation data into the scene.
-3. Optionally export CSV for editing and/or server splitting.
-4. Define a naming scheme that makes the output self-explanatory.
-5. Open the server.
-6. Open one or more workers on other machines.
-7. Use the Batch Renderer to render locally or submit to the server.
+2. Optionally export CSV for editing and/or server splitting.
+3. Define a naming scheme that makes the output self-explanatory.
+4. Open the server.
+5. Open one or more workers on other machines.
+6. Use the Batch Renderer to render locally or submit to the server.
 
 If you do not want variations, the workflow is even simpler:
 
@@ -139,16 +140,14 @@ The table is where most of your work happens.
 - `+ Row`: add another variation.
 - `+ Column`: add another property you want to control.
 - `Edit CSV`: open the table in a temporary CSV file for live editing. The dropdown arrow on this button also gives you `Import CSV` and `Export CSV` for moving table data in and out of VariationMGR.
-- `Save to Scene`: store the current setup inside the `.max` file. The dropdown arrow on this button gives you `Import Variation Config` and `Export Variation Config` for portable JSON snapshots of the full variation setup.
 - `Reset`: clear the current variation setup from both the UI and the scene file. This cannot be undone.
 
 #### Practical advice
 
-- Keep column names human-readable. They become tokens in the naming scheme.
-- Use one column per business decision, not one column per tiny technical detail.
-- Duplicate rows when building close variants. It is faster and safer than rebuilding from scratch.
+- When making complex or many edits to the CSV data, use the edit CSV feature which allows you to edit the CSV data using an external program like Open office calc or Excell. This allows for greater flexibility than what the CSV editor in  
 - Right-click rows to duplicate or delete them.
 - Right-click columns to rename or delete them.
+- If you are a poweruser or someone with scripting experience, you can post jobs directly to the server using powershell. it has 0 security built in which is on purpose. This allows you to creat complex job schemas and logic, while still being fully integrated in the VariationMGR pipeline. 
 
 ### Operators: How Rows Actually Change The Scene
 
@@ -163,7 +162,7 @@ The built-in operators cover the main production cases:
 - `UnlitColorsOperator`: use a named color from a color-library CSV.
 - `MultiSubLibOperator`: swap materials from a `.mat` library.
 - `MatFromFolderOperator`: build material results from texture folders.
-- `XRefSceneOperator`: load scene content from external `.max` files.
+- `XRefSceneOperator`: load scene content from external `.max` files. (currently broken)
 - `FloorGeneratorOperator`: drive floor and plank variations from table values.
 
 For each operator:
@@ -228,11 +227,9 @@ you can get files like:
 
 That matters because it:
 
-- makes review faster
-- reduces wrong deliveries
+- allows great flexibility with client requested naming schemes without any manual work
 - helps clients and producers understand files without opening them
-- makes rerenders safer
-- keeps local and network renders organized
+- Makes it easier to find specific renders without remembering their exact row number
 
 #### Good naming habits
 
@@ -256,7 +253,7 @@ You can change these defaults, but always double-check that the scheme will prod
 
 #### The preview
 
-VariationMGR shows a live preview under the naming field.
+VariationMGR shows a live preview under the naming field. (except for the camera field)
 
 ### Render Settings Inside VariationMGR
 
@@ -272,7 +269,7 @@ You can choose:
 
 Use `Active Camera` when every row should render from the current render camera.
 
-Use `All Cameras` when each row should be rendered from every Corona camera in the scene.
+Use `All Cameras` when each row should be rendered from every Corona camera in the scene. Make sure to include the camera name in the naming scheme. Otherwise your renders with overwrite eachother.
 
 Use `From Column` when the row itself decides which camera to use. This is one of the most powerful setups, because it lets your table describe both the scene state and the view.
 
@@ -288,20 +285,14 @@ This is useful when you want to render only part of a large table, for example:
 
 In this system, the header is considered row 1, and your first data row starts at row 2. Entering row 1 as a range start is not valid and will be corrected to row 2 automatically.
 
+Naturally "everything should be 0 based arrays" sounds great on paper, but produces many logical contradictions. Any table editing program shows the first row as row 1, not 0, and then our data always starts at row 2.  
+
 ### Saving Your Work Properly
 
 This matters:
 
-`Save to Scene` is what makes the variation setup travel with the `.max` file.
+Variation scheme and data is saved straight into the maxfile. this is why it's important to save the maxfile after changing variation data or scheme. You do have the ability to override the CSV and variation JSON scheme in the batchrenderer, but this is mostly for advanced users.
 
-If you forget to save to scene, the Batch Renderer and the network may still see the old setup, not your latest changes.
-
-A safe habit is:
-
-1. test rows
-2. confirm naming
-3. click `Save to Scene`
-4. then open the Batch Renderer
 
 ### CSV And JSON: When To Use Which
 
@@ -315,7 +306,7 @@ Use it for:
 - spreadsheet cleanup
 - copying values in bulk
 - planning combinations
-- sharing variation rows with non-technical teammates
+- server-side row splitting in the Batch Renderer
 
 The `Edit CSV` button is especially useful because it opens a temporary CSV and syncs the table back into VariationMGR as you save.
 
@@ -339,7 +330,6 @@ Use it when you want:
 - a portable snapshot of the variation setup
 - a backup outside the scene
 - a clean handoff between scenes or users
-- server-side row splitting in the Batch Renderer
 
 For most artists:
 
@@ -390,11 +380,11 @@ The queue is the list of files you want to render or submit.
 #### Key buttons
 
 - `+ Add Files`: add `.max` scenes.
-- `Assign JSON`: attach a variation config JSON override to selected files.
 - `Assign CSV`: attach a CSV row override to selected files.
 - `Split for Server`: split one file's variation rows into many server jobs.
 - `Remove`: remove selected files.
 - `Clear`: clear the entire queue.
+- `add current`: adds the currently open maxfile to the queue
 
 You can also right-click queued files for useful actions like:
 
@@ -412,11 +402,7 @@ Here you set:
 - output folder
 - optional version label
 
-#### Important note about versioning
-
-If you are rendering without VariationMGR, the version field is a quick way to separate output sets.
-
-If you are rendering with VariationMGR naming, your main naming control is the naming scheme you created in VariationMGR. In practice, that is where you should put the important business meaning.
+If you are rendering with VariationMGR naming, your main naming control is the naming scheme you created in VariationMGR and the version selector is not used by the rendering core.
 
 ### Render Settings
 

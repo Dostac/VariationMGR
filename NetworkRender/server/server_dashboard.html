@@ -152,13 +152,11 @@
         </label>
       </div>
 
-      <!-- Action buttons row -->
+      <!-- Action buttons row. Per-selection actions (Edit, Requeue, Freeze,
+           Remove…) live in the right-click context menu on job rows; only
+           queue-wide actions, which have no per-row home, stay as buttons. -->
       <div class="jobs-actions" style="margin-bottom:10px">
-        <button class="btn" id="btn-edit-sel" disabled>Edit Selected</button>
-        <button class="btn" id="btn-requeue-sel" disabled>Requeue Selected</button>
-        <button class="btn" id="btn-freeze-sel" disabled>Freeze Selected</button>
-        <button class="btn" id="btn-unfreeze-sel" disabled>Unfreeze Selected</button>
-        <button class="btn btn-danger" id="btn-remove-sel" disabled>Remove Selected</button>
+        <span class="jobs-actions-hint" title="Right-click a job row for Edit, Requeue, Freeze and Remove">Right-click a row for actions ›</span>
         <span class="sep"></span>
         <button class="btn" id="btn-clear-queue">Clear Queue</button>
         <button class="btn" id="btn-remove-done">Remove Done</button>
@@ -287,6 +285,17 @@
           <button class="btn btn-primary" id="edit-save">Save</button>
         </div>
       </div>
+    </div>
+
+    <!-- ── Job row context menu (right-click) ────────────────────────── -->
+    <div id="ctx-menu" class="ctx-menu" hidden role="menu">
+      <button class="ctx-item" data-action="edit"     role="menuitem">Edit selected item(s)</button>
+      <button class="ctx-item" data-action="requeue"  role="menuitem">Requeue selected item(s)</button>
+      <button class="ctx-item" data-action="freeze"   role="menuitem">Freeze selected item(s)</button>
+      <button class="ctx-item" data-action="unfreeze" role="menuitem">Unfreeze selected item(s)</button>
+      <button class="ctx-item" data-action="copy"     role="menuitem">Copy output path</button>
+      <div class="ctx-sep"></div>
+      <button class="ctx-item ctx-danger" data-action="remove" role="menuitem">Remove selected item(s) from queue</button>
     </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>

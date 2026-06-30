@@ -83,9 +83,24 @@ the payload) and can be dragged to reorder; the drop commits via
 `/admin/queue/reorder`. Polling is suspended mid-drag so a refresh can't rebuild
 the table under the dragged row.
 
-Selected jobs can be frozen/unfrozen ("Freeze/Unfreeze Selected"), which posts to
-`/admin/jobs/freeze`. Frozen rows show a ❄ badge and a tint; the payload's
-`frozen_count` is shown in the stats line and excluded from the ETA estimate.
+Selected jobs can be frozen/unfrozen (from the right-click menu below), which
+posts to `/admin/jobs/freeze`. Frozen rows show a ❄ badge and a tint; the
+payload's `frozen_count` is shown in the stats line and excluded from the ETA
+estimate.
+
+**Per-selection actions live in a right-click context menu on job rows**, not on
+the action bar — the bar would otherwise sprout too many buttons and hurt the
+overview. Right-click is smart about selection: right-clicking a row already in
+the selection acts on the whole selection; right-clicking an unselected row
+selects just it first. The menu offers Edit / Requeue / Freeze / Unfreeze / Copy
+output path / Remove …, all worded with a constant "item(s)" (no plural-switching
+logic). Items that don't apply to the selection are greyed, not hidden (e.g.
+Freeze when nothing freezable, Copy when multiple rows are selected), so the
+menu shape stays stable. Each item just calls the existing `act*` selection
+functions — no new endpoints. The native WebView2/browser menu is suppressed via
+`preventDefault()`; the menu dismisses on click-away, scroll, resize, or Escape.
+Only **queue-wide** actions that have no per-row home stay as bar buttons:
+Clear Queue, Remove Done, Remove Failed, Clear All.
 
 Each job row has a pencil button that opens a modal overlay to edit that job's
 render/output settings. The modal's layout deliberately mirrors the 3ds Max
@@ -99,8 +114,8 @@ render settings" is on, and the Bit Depth options are format-dependent (jpg =
 `output.depth_index` stored as the index into the current format's list.
 
 The same modal also does **multi-edit**: select rows (click / Ctrl+click /
-Shift+click) and either click "Edit Selected" or the pencil on any selected row
-to edit the whole selection at once. Fields where every selected job already
+Shift+click) and choose "Edit selected item(s)" from the right-click menu (or
+the pencil on any selected row) to edit the whole selection at once. Fields where every selected job already
 agrees are shown with that shared value; fields that differ show a **mixed**
 affordance — a dashed input with a "— mixed —" placeholder, a "— mixed —"
 `<select>` option, or an **indeterminate (dashed) checkbox**. A mixed field left

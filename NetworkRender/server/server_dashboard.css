@@ -1102,6 +1102,53 @@ tbody tr.selected:hover td { background: rgba(121,192,255,0.16); }
 }
 .btn-primary:hover:not(:disabled) { background: rgba(121, 192, 255, 0.2); }
 
+/* ── Job row context menu (right-click) ──────────────────────────────────── */
+
+.jobs-actions-hint {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.ctx-menu {
+  position: fixed;
+  z-index: 110;                 /* above content + toast; below the edit modal (120) */
+  min-width: 230px;
+  padding: 5px;
+  background: var(--bg-section);
+  border: 1px solid var(--border-hi);
+  border-radius: var(--radius);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
+  user-select: none;
+}
+.ctx-menu[hidden] { display: none; }
+
+.ctx-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.8125rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ctx-item:hover:not(:disabled) { background: var(--bg-hover); }
+.ctx-item:disabled { opacity: 0.4; cursor: default; }
+
+.ctx-danger { color: var(--red); }
+.ctx-danger:hover:not(:disabled) { background: var(--red-bg); }
+
+.ctx-sep {
+  height: 1px;
+  margin: 5px 6px;
+  background: var(--border);
+}
+
 /* ── Responsive ──────────────────────────────────────────────────────────── */
 
 @media (max-width: 1050px) {
