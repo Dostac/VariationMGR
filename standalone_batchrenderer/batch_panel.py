@@ -462,6 +462,21 @@ class BatchPanel(QtWidgets.QWidget):
         self.chk_alpha.setChecked(prefs[1])
         self.cmb_depth.blockSignals(False)
         self.chk_alpha.blockSignals(False)
+
+        # Max's pngio writes render-element PNGs with an invalid IHDR ("PNG
+        # Library Internal Error" per element, 0-byte files) regardless of bit
+        # depth. The beauty pass is unaffected. Disable render elements for PNG
+        # so the option can't be armed for a format that can't honour it.
+        re_ok = fmt != "png"
+        self.chk_re.setEnabled(re_ok)
+        if re_ok:
+            self.chk_re.setToolTip("")
+        else:
+            self.chk_re.setChecked(False)
+            self.chk_re.setToolTip(
+                "Render elements aren't supported for PNG output.\n"
+                "Use EXR or TIFF to save passes.")
+
         self.save_ini()
 
     def save_current_format_state(self):

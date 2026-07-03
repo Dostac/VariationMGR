@@ -872,8 +872,10 @@ function syncFormatDependents(desiredDepthIndex) {
     sel.disabled = false;
     $("f-alpha-row").hidden = false;
     markMixed(sel, true);
+    syncRenderElementsAvailability(MIXED);
     return;
   }
+  syncRenderElementsAvailability(fmt);
   const opts = DEPTH_OPTS[fmt] || DEPTH_OPTS.jpg;
   const prevMixed = desiredDepthIndex === MIXED;
   // No arg → user just changed format; keep the current index if it's a real
@@ -893,6 +895,27 @@ function syncFormatDependents(desiredDepthIndex) {
 
 // Visually flag a control as holding mixed values (a dashed/idle look via CSS).
 function markMixed(el, isMixed) { el.classList.toggle("mixed", !!isMixed); }
+
+// Max's pngio writes render-element PNGs with an invalid IHDR ("PNG Library
+// Internal Error" per element, 0-byte files) regardless of bit depth, so
+// render elements are unavailable for PNG. Force the checkbox off and disable
+// it — clearing its indeterminate/mixed state so the false is actually written
+// on save. For any other (or mixed) format, re-enable it and leave its value.
+function syncRenderElementsAvailability(fmt) {
+  const el = $("f-save-re");
+  if (!el) return;
+  if (fmt === "png") {
+    el.checked = false;
+    el.indeterminate = false;
+    el.dataset.mixed = "";
+    el.disabled = true;
+    el.parentElement.title =
+      "Render elements aren't supported for PNG output. Use EXR or TIFF to save passes.";
+  } else {
+    el.disabled = false;
+    el.parentElement.title = "";
+  }
+}
 
 // Prefill one checkbox from N job values: checked/unchecked if all agree,
 // else indeterminate (the "dash"). Records mixedness on the element.
@@ -1015,6 +1038,9 @@ function openEditModal(primaryId) {
 
   fillCheck("f-save-alpha", O("save_alpha").map(Boolean));
   fillCheck("f-save-re",    O("save_render_elements").map(Boolean));
+  // fillCheck reset the render-elements box from stored values; re-apply the
+  // PNG guard so a PNG job can't show it checked/enabled.
+  syncRenderElementsAvailability(allSame(formats) ? formats[0] : MIXED);
 
   $("edit-overlay").hidden = false;
   $("f-output-folder").focus();
