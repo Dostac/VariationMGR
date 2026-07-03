@@ -413,11 +413,12 @@ class BatchRendererCore:
         if not os.path.exists(out_dir):
             os.makedirs(out_dir, exist_ok=True)
 
-        # Every render gets a job id and its own progress log in the output
-        # folder. Server jobs arrive with a job_id from the worker; local /
-        # interactive renders mint one here, so the path is identical either
-        # way. The core owns the file (it always runs, headless or in 3ds Max);
-        # log_cb only mirrors each line live to whoever is watching.
+        # Every render gets a job id. Server jobs arrive with one from the
+        # worker; local / interactive renders mint one here, so the path is
+        # identical either way. All jobs rendering into the same folder share
+        # one "batchrender.log" there, each line tagged with its job id. The
+        # core owns the file (it always runs, headless or in 3ds Max); log_cb
+        # only mirrors each line live to whoever is watching.
         job_id = scene_job.get("job_id") or render_logger.make_job_id(
             os.path.splitext(os.path.basename(scene_file))[0] if scene_file else ""
         )
@@ -426,11 +427,20 @@ class BatchRendererCore:
 
         mirror = self.log_cb if callable(self.log_cb) else print
         self._rlog = render_logger.RenderLog(out_dir, job_id, mirror=mirror).open()
-        self.log(f"Job {job_id}")
+        scene_label = os.path.basename(scene_file) if scene_file else "(current scene)"
+        self.log(f"=== Job {job_id} started: {scene_label} ===")
         try:
-            return self._run_scene_job(
+            result = self._run_scene_job(
                 scene_job, output_cfg, render_cfg, scene_file, out_dir, result
             )
+            self.log(
+                f"=== Job {job_id} finished: {result['status']} "
+                f"({result['rendered']}/{result['attempted']} rendered) ==="
+            )
+            return result
+        except Exception as exc:
+            self.log(f"=== Job {job_id} aborted: {exc} ===")
+            raise
         finally:
             self._rlog.close()
             self._rlog = None

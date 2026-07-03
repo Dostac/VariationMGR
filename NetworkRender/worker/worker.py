@@ -553,9 +553,9 @@ class WorkerRuntime:
             return {"status": "success", "mock": True}
 
         normalized = schema.normalize_job_request(scene_job)
-        # Carry the worker's job id into the core so its progress log is named
-        # <output_folder>/<job_id>.log -- the file becomes the channel the
-        # worker (and colleagues) tail for live progress.
+        # Carry the worker's job id into the core so this job's lines in the
+        # shared <output_folder>/batchrender.log are tagged with the same id
+        # the server and dashboard know it by.
         if job_id:
             normalized["job_id"] = job_id
         fd, job_path = tempfile.mkstemp(prefix="vb_job_", suffix=".json")

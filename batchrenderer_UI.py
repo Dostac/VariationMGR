@@ -456,18 +456,14 @@ class BatchRenderDialog(QtWidgets.QDialog):
     # -----------------------------------------------------------------------
 
     def log(self, msg):
+        # Screen-only: the file record is the render core's job (it writes the
+        # shared batchrender.log in the output folder); writing UI chatter to a
+        # second file just duplicated the same lines with different timestamps.
         ts   = datetime.datetime.now().strftime("%H:%M:%S")
         line = f"[{ts}] {msg}"
         self.txt_log.append(line)
         self.txt_log.moveCursor(QtGui.QTextCursor.MoveOperation.End)
         QtCore.QCoreApplication.processEvents()
-        out_dir = self.le_path.text()
-        if out_dir and os.path.exists(out_dir):
-            try:
-                with open(os.path.join(out_dir, "batch_render_log.txt"), "a") as f:
-                    f.write(line + "\n")
-            except Exception:
-                pass
 
     # -----------------------------------------------------------------------
     # FORMAT
