@@ -1472,6 +1472,88 @@ def run_server(host, port, state_file, local_only=True, enable_discovery=True):
     print("Server stopped.")
 
 
+def _mapped_drive_to_unc(path):
+    """Resolve a mapped-drive path (``Z:\\foo``) to its UNC form on Windows.
+
+    Native pickers return whatever the user browsed through. A drive letter is
+    only meaningful on this machine, while the workers need the
+    ``\\\\server\\share`` form. Anything that isn't a mapped drive (already UNC,
+    a local disk, empty) comes back unchanged, as does anything the lookup
+    can't resolve.
+    """
+    text = str(path or "")
+    if os.name != "nt" or len(text) < 2 or text[1] != ":" or text.startswith("\\\\"):
+        return text
+    try:
+        import ctypes
+        from ctypes import wintypes
+        mpr = ctypes.WinDLL("mpr")
+        length = wintypes.DWORD(1024)
+        buf = ctypes.create_unicode_buffer(length.value)
+        rc = mpr.WNetGetConnectionW(text[:2], buf, ctypes.byref(length))
+        if rc != 0 or not buf.value:
+            return text
+        return buf.value.rstrip("\\") + text[2:]
+    except Exception:
+        return text
+
+
+def _file_dialog_types():
+    """(OPEN, FOLDER) dialog constants across pywebview versions."""
+    import webview
+    enum = getattr(webview, "FileDialog", None)
+    if enum is not None:
+        return enum.OPEN, enum.FOLDER
+    return webview.OPEN_DIALOG, webview.FOLDER_DIALOG
+
+
+class _DashboardNativeApi:
+    """Python methods the dashboard page calls as ``window.pywebview.api.<name>()``.
+
+    Only exists inside the ``--ui`` window: a plain browser never gets a full
+    path out of a file picker, so there the dashboard hides its Browse buttons
+    and falls back to pasted paths. Paths come back in native Windows form
+    (backslashes), with mapped drive letters resolved to UNC.
+    """
+
+    def __init__(self):
+        self._window = None   # set once create_window() returns
+
+    def _dialog(self, dialog_type, directory, allow_multiple, file_types=()):
+        if self._window is None:
+            return []
+        directory = str(directory or "").replace("/", "\\")
+        try:
+            result = self._window.create_file_dialog(
+                dialog_type,
+                directory=directory,
+                allow_multiple=allow_multiple,
+                file_types=file_types,
+            )
+        except Exception as exc:
+            print(f"Native file dialog failed: {exc}")
+            return []
+        if not result:
+            return []
+        if isinstance(result, str):
+            result = [result]
+        return [_mapped_drive_to_unc(p) for p in result if str(p or "").strip()]
+
+    def pick_scene_files(self, start_dir=""):
+        """Multi-select .max scenes. Returns a list of paths (empty on cancel)."""
+        open_dialog, _ = _file_dialog_types()
+        return self._dialog(
+            open_dialog, start_dir, True,
+            ("3ds Max scenes (*.max)", "All files (*.*)"),
+        )
+
+    def pick_output_folder(self, start_dir=""):
+        """Single folder. Returns the path, or "" on cancel."""
+        _, folder_dialog = _file_dialog_types()
+        picked = self._dialog(folder_dialog, start_dir, False)
+        return picked[0] if picked else ""
+
+
 def run_server_window(host, port, state_file, local_only=True, enable_discovery=True):
     """Run the server headless and present the web dashboard in a native window.
 
@@ -1502,9 +1584,20 @@ def run_server_window(host, port, state_file, local_only=True, enable_discovery=
     print(f"VB Batch Server listening on http://{host}:{port}")
     print(f"State file: {os.path.abspath(state_file)}")
     print(f"Opening dashboard window at {url}")
+    # Not private mode: the page keeps its localStorage (remembered New Job
+    # settings, worker colours) across restarts, stored next to the state file.
+    storage_dir = os.path.join(os.path.dirname(os.path.abspath(state_file)), "webview")
     try:
-        webview.create_window("VB Render Server", url, width=1320, height=900)
-        webview.start()  # blocks on the GUI loop until the window is closed
+        os.makedirs(storage_dir, exist_ok=True)
+    except OSError:
+        pass
+    api = _DashboardNativeApi()
+    try:
+        api._window = webview.create_window(
+            "VB Render Server", url, width=1320, height=900, js_api=api,
+        )
+        # Blocks on the GUI loop until the window is closed.
+        webview.start(private_mode=False, storage_path=storage_dir)
     finally:
         runtime.stop()
         print("Server stopped.")

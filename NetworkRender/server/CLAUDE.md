@@ -100,7 +100,8 @@ menu shape stays stable. Each item just calls the existing `act*` selection
 functions — no new endpoints. The native WebView2/browser menu is suppressed via
 `preventDefault()`; the menu dismisses on click-away, scroll, resize, or Escape.
 Only **queue-wide** actions that have no per-row home stay as bar buttons:
-Clear Queue, Remove Done, Remove Failed, Clear All.
+Clear Queue, Remove Done, Remove Failed, Clear All, plus the green **+ New Job**
+button docked to the right edge of that bar (see "New Job" below).
 
 Each job row has a pencil button that opens a modal overlay to edit that job's
 render/output settings. The modal's layout deliberately mirrors the 3ds Max
@@ -132,13 +133,54 @@ Polling is suspended while the modal is open (via the `editingJobIds` guard in
 jobs the modal shows an orange warning that the change only takes effect on
 requeue (with a count when multiple are selected); it never blocks the edit.
 
-Not yet exposed in the modal (candidates if needed later): the per-file render
-row range (`render_range_expr`) and OCIO color-management overrides (`ocio.*`),
-both of which the batch renderer offers.
+Not editable in the modal (candidates if needed later): the row range
+(`render_range_expr` is settable at submit time, see below, but not via
+`/admin/jobs/update`), OCIO color-management overrides (`ocio.*`), and the
+per-scene `variation_override` / `csv_override` payloads, all of which the
+batch renderer offers.
+
+**New Job** (`openNewJobModal` in `server_dashboard.js`) reuses the very same
+modal in a second mode (`modalMode = "new"`) so the two forms can't drift.
+`setModalMode()` swaps the title, reveals the submit-only controls (a Scene
+Files textarea, one `.max` path per line, which `parseScenePaths()` trims,
+de-dupes, unquotes via `cleanPathText()` and flips `\` to `/`; and a Row Range
+input under VariationMGR Integration) and relabels the footer button "Submit"
+in green. Explorer's "Copy as path" wraps paths in double quotes (PowerShell
+in single quotes): `cleanPathText()` strips one matching pair wherever a path
+enters the form, the scene list and the folder field normalise pasted text in
+place (`onScenePaste` / `onFolderPaste`, via `setRangeText`), the folder field
+also tidies typed quotes on blur, and `computeSave()` cleans the folder again
+as a safety net, so this applies to edits too.
+`fillJobForm()` prefills render/output from `NEW_JOB_DEFAULTS` (the schema
+defaults) overlaid with the last submission remembered in `localStorage`
+(`vb_new_job_form`; the scene list and row range are never remembered).
+Submit validates client-side: at least one scene, output folder set,
+`isValidRowRangeExpr()` (a mirror of `variation_core.is_valid_row_range_expr`),
+and a camera name when the fallback mode is `by_name`. Lines not ending in
+`.max` are flagged in the hint and confirmed, not blocked. It then POSTs the
+full request `{max_files, load_scene: true, render, output, render_range_expr}`
+to the existing `/submit` (no new endpoint); the server mints the request id
+and fans out one queued job per scene. On failure the modal stays open with
+the error in the banner. Polling keeps running in new mode: only
+`editingJobIds` suspends it.
+
+Inside the `--ui` window the Scene Files block and the Folder field each get a
+**Browse…** button that opens a native Explorer dialog through pywebview's
+`js_api` (`_DashboardNativeApi` in `server.py`: `pick_scene_files` is a
+multi-select `.max` picker, `pick_output_folder` a folder picker). Returned
+paths are native Windows form with mapped drive letters resolved to UNC via
+`WNetGetConnectionW`, so workers can reach them. The page reveals the buttons on
+pywebview's `pywebviewready` event (`revealNativePickers`) and keeps them
+hidden in a plain browser, where a file input cannot expose full paths. The
+folder button also works in edit mode and marks the field touched, so a
+multi-select edit writes it.
 
 `--ui` opens this same page in a pywebview window (`run_server_window` in
 `server.py`) — the server runs headless in-process and the window just points at
-`http://127.0.0.1:<port>/`. Closing the window stops the server.
+`http://127.0.0.1:<port>/`. Closing the window stops the server. The window is
+created with `js_api=_DashboardNativeApi()` (native pickers, above) and started
+with `private_mode=False` and a `storage_path` under the state file's folder
+(`.../webview`), so the page's localStorage survives restarts.
 
 Note: a browser/WebView cannot open Explorer on the host, so the old native
 "open output folder" action is replaced by a copy-path button (copies the

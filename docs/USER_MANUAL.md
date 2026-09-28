@@ -734,7 +734,20 @@ It refreshes automatically, so it is perfect for:
 - a tablet on your desk
 - a phone check during long runs
 
-Think of it as a live status board, not a control panel.
+It is also a light control panel: right-click a job row to edit, requeue, freeze or remove it, and use the green `+ New Job` button to queue new scenes without opening 3ds Max.
+
+#### Creating jobs from the dashboard
+
+Click the green `+ New Job` button at the right end of the job actions row. The form mirrors the Batch Renderer:
+
+1. Under **Scene Files**, click **Browse…** to pick scenes in Explorer (multi-select works), or paste one `.max` path per line (UNC paths such as `\\vb_nas\nas\...`). Explorer's **Copy as path** output pastes straight in: the surrounding quotes are removed for you, also for the output folder. Each line becomes its own job.
+2. Set the output folder (**Browse…** next to it opens a folder picker), version, format and render settings. Your last submission's settings are remembered, so repeat submissions only need new scene paths.
+
+The **Browse…** buttons appear only in the server window, because a normal browser cannot hand a web page the full path of a file. From a phone or laptop browser, paste the paths instead.
+3. Optionally limit the variation rows with **Row Range** (for example `2,4-7`; row 1 is the CSV header, so data starts at row 2). It applies to every scene in the submission.
+4. Press **Submit**. The jobs appear under the Queued tab straight away.
+
+Variation JSON / CSV overrides and OCIO output transforms cannot be set from the dashboard. Submit those from the Batch Renderer.
 
 ## Practical Case-Based Workflows
 

@@ -431,6 +431,18 @@ body {
   border-color: var(--red);
 }
 
+/* Green-tinted affirmative action (New Job / Submit): the tonal pattern in green. */
+.btn-success {
+  background: var(--green-bg);
+  color: var(--green);
+  border-color: var(--green);
+}
+.btn-success:hover:not(:disabled) { background: rgba(63, 185, 80, 0.2); }
+
+/* .btn is inline-flex, which would beat the UA [hidden] rule (the Browse…
+   buttons are hidden outside the pywebview window). */
+.btn[hidden] { display: none; }
+
 /* ── Toggle ──────────────────────────────────────────────────────────────── */
 
 .toggle {
@@ -1033,6 +1045,35 @@ tbody tr.selected:hover td { background: rgba(121,192,255,0.16); }
   gap: 10px;
   margin-top: 9px;
 }
+/* display:grid above beats the UA [hidden] rule, so the conditionally shown
+   rows (Camera Name, Row Range) need this explicitly. */
+.form-row[hidden] { display: none; }
+
+/* Label-above / full-width control, for controls too wide for a form-row
+   (the New Job scene list). */
+.form-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 9px;
+  min-width: 0;
+}
+
+/* Label with an optional action button (Browse…) above a full-width control. */
+.form-block-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+/* Text input with a trailing button (Browse…) inside a form-row. */
+.input-with-btn {
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+}
+.input-with-btn .input { flex: 1; min-width: 0; }
 
 .field-label {
   font-size: 0.8125rem;
@@ -1085,6 +1126,25 @@ tbody tr.selected:hover td { background: rgba(121,192,255,0.16); }
   outline: none;
   border-color: var(--blue);
 }
+
+/* Multi-line .input (the New Job scene path list): monospace, no wrapping so
+   long UNC paths stay one per line, vertically resizable. */
+.input-multiline {
+  min-height: 96px;
+  padding: 6px 8px;
+  line-height: 1.45;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 0.78rem;
+  white-space: pre;
+  overflow: auto;
+  resize: vertical;
+}
+
+/* Client-side validation failure (bad row-range expression). */
+.input.invalid { border-color: var(--red); }
+
+/* Hint carrying a warning (e.g. scene lines that don't end in .max). */
+.field-hint.warn { color: var(--orange); font-style: normal; }
 
 .modal-body .select { min-height: 28px; width: 100%; }
 .modal-body .select:disabled { opacity: 0.55; cursor: not-allowed; }

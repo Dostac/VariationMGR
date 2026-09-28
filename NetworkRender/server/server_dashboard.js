@@ -16,6 +16,12 @@ let selectionAnchorId = null;
 // refresh can't overwrite the form values the user is editing.
 let editingJobIds = [];
 
+// Mode of the shared job modal: "edit" (existing job(s)), "new" (compose a
+// submission for POST /submit) or null when closed. Only edit mode suspends
+// polling (via editingJobIds): a New Job form isn't prefilled from the
+// snapshot, so a background refresh can't disturb it.
+let modalMode = null;
+
 const perfFilter = {
   workers: new Set(),
   statusMode: "done",
@@ -846,7 +852,7 @@ async function actToggleAutoRequeue() {
   } catch (e) { toast("Toggle auto-requeue failed: " + e.message, true); }
 }
 
-// ── Edit job modal ─────────────────────────────────────────────────────────────
+// ── Job modal (Edit Job / New Job share one form) ─────────────────────────────
 
 // Per-format Bit Depth options, mirroring on_format_changed() in
 // batchrenderer_UI.py. The stored output.depth_index is an index into the
@@ -864,6 +870,23 @@ const MIXED = "__mixed__";   // synthetic <select> value for differing selection
 // (plus fields that started non-mixed) are written on save, so untouched
 // "mixed" fields preserve each job's own value. See computeSave().
 const editTouched = new Set();
+
+// Defaults for a fresh New Job form: the render/output halves of
+// _DEFAULT_JOB_REQUEST in NetworkRender/shared/job_schema.py.
+const NEW_JOB_DEFAULTS = {
+  render: {
+    override_settings: false, resolution: 4000, pass_limit: 75, noise_limit: 6.0,
+    use_variations: true, fallback_camera_mode: "all", fallback_camera_name: "",
+  },
+  output: {
+    folder: "", version: null, format: "jpg", depth_index: 0,
+    save_alpha: false, save_render_elements: false,
+  },
+};
+
+// localStorage key under which the last submitted render/output settings are
+// remembered (per browser), so the next New Job starts from them.
+const NEW_JOB_MEMORY_KEY = "vb_new_job_form";
 
 function findJob(jobId) {
   if (!lastSnapshot) return null;
@@ -1005,6 +1028,34 @@ function actEditSelected() {
   openEditModal(ids[0]);   // primaryId is in the selection → edits all of it
 }
 
+// Switch the shared modal between "edit" and "new": title, the submit-only
+// sections (scene list, row range), the footer button and the notice banner.
+// Field values are filled separately by fillJobForm().
+function setModalMode(mode, title) {
+  modalMode = mode;
+  const isNew = (mode === "new");
+  editTouched.clear();
+  $("edit-title").textContent = title;
+  const warn = $("edit-warn");
+  warn.textContent = "";
+  warn.hidden = true;
+  $("f-scene-section").hidden = !isNew;
+  $("f-row-range-row").hidden = !isNew;
+  const btn = $("edit-save");
+  btn.textContent = isNew ? "Submit" : "Save";
+  btn.classList.toggle("btn-success", isNew);
+  btn.classList.toggle("btn-primary", !isNew);
+  btn.disabled = false;
+}
+
+// Show a message in the modal's banner (orange, above the form). Used for the
+// non-queued warning in edit mode and for validation/submit errors in new mode.
+function showModalNotice(msg) {
+  const warn = $("edit-warn");
+  warn.textContent = msg;
+  warn.hidden = false;
+}
+
 function openEditModal(primaryId) {
   // Edit the whole current selection if the clicked row is part of it;
   // otherwise edit just the clicked row.
@@ -1014,28 +1065,32 @@ function openEditModal(primaryId) {
   const jobs = ids.map(findJob).filter(Boolean);
   if (!jobs.length) { toast("Job no longer exists.", true); return; }
   ids = jobs.map((j) => j.job_id);
-
-  editingJobIds = ids;   // suspends polling via loadData()'s guard
-  editTouched.clear();
   const multi = jobs.length > 1;
 
-  $("edit-title").textContent = multi
+  setModalMode("edit", multi
     ? `Edit ${jobs.length} Jobs`
-    : `Edit Job · ${jobs[0].scene_name || ids[0]}`;
+    : `Edit Job · ${jobs[0].scene_name || ids[0]}`);
+  editingJobIds = ids;   // suspends polling via loadData()'s guard
 
   // Warn (but don't block) about non-queued jobs: edits only take effect on
   // requeue. With a mixed selection, count how many are affected.
   const nonQueued = jobs.filter((j) => (j.status || "").toLowerCase() !== "queued");
-  const warn = $("edit-warn");
   if (nonQueued.length) {
-    warn.textContent = multi
+    showModalNotice(multi
       ? `${nonQueued.length} of ${jobs.length} selected job(s) are not queued. Changes are saved but only take effect for those once you requeue them.`
-      : `This job is "${jobs[0].status}". Changes are saved but only take effect if you requeue it.`;
-    warn.hidden = false;
-  } else {
-    warn.hidden = true;
+      : `This job is "${jobs[0].status}". Changes are saved but only take effect if you requeue it.`);
   }
 
+  fillJobForm(jobs);
+  $("edit-overlay").hidden = false;
+  $("f-output-folder").focus();
+}
+
+// Prefill every render/output control from one or more {render, output}
+// records. With several records, fields that differ show the mixed
+// affordance; with one (a single job, or the New Job defaults) every field
+// simply takes that value.
+function fillJobForm(jobs) {
   const R = (k) => jobs.map((j) => (j.render || {})[k]);
   const O = (k) => jobs.map((j) => (j.output || {})[k]);
 
@@ -1077,16 +1132,228 @@ function openEditModal(primaryId) {
   // fillCheck reset the render-elements box from stored values; re-apply the
   // PNG guard so a PNG job can't show it checked/enabled.
   syncRenderElementsAvailability(allSame(formats) ? formats[0] : MIXED);
-
-  $("edit-overlay").hidden = false;
-  $("f-output-folder").focus();
 }
 
-function closeEditModal() {
-  if (!editingJobIds.length) return;
+// Close the modal in either mode and resume polling (edit mode had it
+// suspended; pulling a fresh snapshot right away also shows the rows a New
+// Job submit just queued).
+function closeJobModal() {
+  if (!modalMode) return;
+  modalMode = null;
   editingJobIds = [];
   $("edit-overlay").hidden = true;
-  loadData();   // resume: pull a fresh snapshot we may have skipped while open
+  loadData();
+}
+
+// ── New Job (submit straight from the dashboard) ─────────────────────────────
+
+// Open the shared modal in "new" mode: an empty scene list plus render/output
+// settings prefilled from the last submission made in this browser, falling
+// back to the schema defaults. Scene list and row range are never remembered:
+// they belong to one submission.
+function openNewJobModal() {
+  setModalMode("new", "New Job");
+  editingJobIds = [];
+  const remembered = loadNewJobMemory();
+  fillJobForm([{
+    render: { ...NEW_JOB_DEFAULTS.render, ...(remembered.render || {}) },
+    output: { ...NEW_JOB_DEFAULTS.output, ...(remembered.output || {}) },
+  }]);
+  // fillInput() clears placeholders; restore the ones that help a blank form.
+  $("f-output-folder").placeholder = "\\\\vb_nas\\nas\\…\\renders";
+  $("f-camera-name").placeholder = "e.g. Detail";
+  const scenes = $("f-scene-files");
+  scenes.value = "";
+  updateSceneHint();
+  $("f-row-range").value = "";
+  syncRowRangeValidity();
+  $("edit-overlay").hidden = false;
+  scenes.focus();
+}
+
+// Explorer's "Copy as path" wraps the path in double quotes, and PowerShell
+// users paste single-quoted ones. Strip whitespace and one matching pair of
+// surrounding quotes so a pasted path is usable as-is. Used wherever a path
+// enters the form: the scene list, the output folder, and their paste handlers.
+function cleanPathText(text) {
+  let t = String(text || "").trim();
+  const m = t.match(/^(["'])(.*)\1$/);
+  if (m) t = m[2].trim();
+  return t;
+}
+
+// Split the textarea into scene paths: one per line, cleaned by
+// cleanPathText(), blank lines and duplicates dropped, backslashes normalised
+// to "/" (the schema does the same server-side). Also returns the lines that
+// don't look like 3ds Max scenes for the hint.
+function parseScenePaths(text) {
+  const files = [];
+  const seen = new Set();
+  const suspicious = [];
+  for (const rawLine of String(text || "").split(/\r?\n/)) {
+    const line = cleanPathText(rawLine);
+    if (!line) continue;
+    const norm = line.replace(/\\/g, "/");
+    const key = norm.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    files.push(norm);
+    if (!/\.max$/i.test(norm)) suspicious.push(line);
+  }
+  return { files, suspicious };
+}
+
+// Live count under the scene list, flagging lines that don't end in .max.
+function updateSceneHint() {
+  const { files, suspicious } = parseScenePaths($("f-scene-files").value);
+  const hint = $("f-scene-hint");
+  if (!files.length) {
+    hint.textContent = "No scenes yet. Paste one .max path per line (Explorer's Copy as path, quotes and all, works); each becomes its own queued job.";
+    hint.classList.remove("warn");
+    return;
+  }
+  let text = `${files.length} scene(s), one job each.`;
+  if (suspicious.length) text += ` ${suspicious.length} line(s) don't end in .max.`;
+  hint.textContent = text;
+  hint.classList.toggle("warn", suspicious.length > 0);
+}
+
+// Mirror of variation_core.is_valid_row_range_expr(): comma-separated table
+// row numbers or ranges ("2,4-7,10"); open ends ("5-", "-9") are allowed;
+// row 1 is the header so every number must be >= 2; empty = all rows.
+function isValidRowRangeExpr(expr) {
+  const text = String(expr || "").trim();
+  if (!text) return true;
+  for (let part of text.split(",")) {
+    part = part.trim();
+    if (!part) continue;
+    const dash = part.indexOf("-");
+    if (dash >= 0) {
+      const a = part.slice(0, dash).trim();
+      const b = part.slice(dash + 1).trim();
+      if (a && !/^\d+$/.test(a)) return false;
+      if (b && !/^\d+$/.test(b)) return false;
+      const start = a ? Number(a) : 2;
+      if (start < 2) return false;
+      if (b && Number(b) < start) return false;
+    } else {
+      if (!/^\d+$/.test(part) || Number(part) < 2) return false;
+    }
+  }
+  return true;
+}
+
+function syncRowRangeValidity() {
+  const el = $("f-row-range");
+  el.classList.toggle("invalid", !isValidRowRangeExpr(el.value));
+}
+
+function loadNewJobMemory() {
+  try {
+    const raw = localStorage.getItem(NEW_JOB_MEMORY_KEY);
+    const obj = raw ? JSON.parse(raw) : null;
+    return (obj && typeof obj === "object") ? obj : {};
+  } catch { return {}; }
+}
+
+function saveNewJobMemory(settings) {
+  try { localStorage.setItem(NEW_JOB_MEMORY_KEY, JSON.stringify(settings)); } catch {}
+}
+
+// ── Native pickers (only inside the pywebview server window) ─────────────────
+// A browser file input never reveals a full path, so "Browse…" exists only
+// where the page runs inside `server.py --ui`: pywebview injects
+// window.pywebview.api (see _DashboardNativeApi in server.py) and fires
+// "pywebviewready" once it's callable. Elsewhere the buttons stay hidden and
+// paths are pasted. The API returns native Windows paths (backslashes, mapped
+// drives resolved to UNC); parseScenePaths()/the schema normalise them later.
+
+function nativeApi() {
+  return (window.pywebview && window.pywebview.api) ? window.pywebview.api : null;
+}
+
+function revealNativePickers() {
+  const on = !!nativeApi();
+  $("f-scene-browse").hidden = !on;
+  $("f-folder-browse").hidden = !on;
+}
+
+// Parent folder of a path in backslash form (what the native dialog wants as
+// its start directory), or "" when there is none.
+function dirOf(path) {
+  const p = String(path || "").trim().replace(/\//g, "\\");
+  const i = p.lastIndexOf("\\");
+  return i > 1 ? p.slice(0, i) : "";
+}
+
+async function browseScenes() {
+  const api = nativeApi();
+  if (!api) return;
+  const ta = $("f-scene-files");
+  const { files } = parseScenePaths(ta.value);
+  const startDir = files.length
+    ? dirOf(files[files.length - 1])
+    : dirOf($("f-output-folder").value);
+  try {
+    const picked = await api.pick_scene_files(startDir);
+    if (!picked || !picked.length) return;
+    const existing = ta.value.replace(/\s+$/, "");
+    ta.value = (existing ? existing + "\n" : "") + picked.join("\n") + "\n";
+    ta.dispatchEvent(new Event("input", { bubbles: true }));   // hint + touched
+  } catch (e) {
+    toast("Browse failed: " + e.message, true);
+  }
+}
+
+async function browseOutputFolder() {
+  const api = nativeApi();
+  if (!api) return;
+  const input = $("f-output-folder");
+  try {
+    const picked = await api.pick_output_folder(cleanPathText(input.value).replace(/\//g, "\\"));
+    if (!picked) return;
+    input.value = picked;
+    input.dispatchEvent(new Event("input", { bubbles: true }));   // marks touched (multi-edit)
+  } catch (e) {
+    toast("Browse failed: " + e.message, true);
+  }
+}
+
+// ── Paste normalisation ───────────────────────────────────────────────────────
+// The parse/save steps cope with quotes anyway, but the field should show what
+// will be sent, so pasted text is cleaned in place: one cleaned path per line
+// in the scene list, the first path only in the single-line folder field.
+// setRangeText() keeps the caret/selection semantics of a normal paste.
+
+function pastedLines(ev) {
+  const dt = ev.clipboardData || window.clipboardData;
+  const raw = dt ? dt.getData("text") : "";
+  return raw ? raw.split(/\r?\n/).map(cleanPathText).filter(Boolean) : [];
+}
+
+function onScenePaste(ev) {
+  const lines = pastedLines(ev);
+  if (!lines.length) return;
+  ev.preventDefault();
+  const el = ev.target;
+  el.setRangeText(lines.join("\n") + "\n", el.selectionStart, el.selectionEnd, "end");
+  el.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+function onFolderPaste(ev) {
+  const lines = pastedLines(ev);
+  if (!lines.length) return;
+  ev.preventDefault();
+  const el = ev.target;
+  el.setRangeText(lines[0], el.selectionStart, el.selectionEnd, "end");
+  el.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+// Typed (not pasted) quotes: tidy the folder field when it loses focus.
+function onFolderChange(ev) {
+  const el = ev.target;
+  const cleaned = cleanPathText(el.value);
+  if (cleaned !== el.value) el.value = cleaned;
 }
 
 // A checkbox should be written only when it holds a definite value: either it
@@ -1123,7 +1390,7 @@ function computeSave() {
   set(render, "use_variations",    checkVal("f-use-variations"));
   set(render, "override_settings", checkVal("f-override-settings"));
 
-  set(output, "folder",  pickVal("f-output-folder", (v) => v.trim()));
+  set(output, "folder",  pickVal("f-output-folder", cleanPathText));
   set(output, "version", pickVal("f-output-version", (v) => v === "" ? null : v));
   set(output, "format",  pickVal("f-output-format"));
   set(output, "depth_index", pickVal("f-depth-index", (v) => Number(v)));
@@ -1143,7 +1410,7 @@ async function saveEditModal() {
 
   if (!changes.render && !changes.output) {
     toast("No changes to apply.");
-    closeEditModal();
+    closeJobModal();
     return;
   }
 
@@ -1156,6 +1423,7 @@ async function saveEditModal() {
   try {
     const r = await postAdmin("/admin/jobs/update", body);
     // Drop the polling guard *before* the refresh so loadData() runs.
+    modalMode = null;
     editingJobIds = [];
     $("edit-overlay").hidden = true;
     const n = (r && r.count != null) ? r.count : ids.length;
@@ -1165,6 +1433,66 @@ async function saveEditModal() {
     toast("Update failed: " + e.message, true);
   } finally {
     saveBtn.disabled = false;
+  }
+}
+
+// Footer button: "Save" posts an edit, "Submit" posts a new submission.
+function onSaveClick() {
+  if (modalMode === "new") submitNewJob();
+  else if (modalMode === "edit") saveEditModal();
+}
+
+// Validate the New Job form, build a full job request (the same shape the
+// Batch Renderer's build_job_request() POSTs) and submit it. The server fans
+// max_files out into one queued job per scene and mints the request id. On
+// failure the modal stays open with the error in the banner so nothing typed
+// is lost.
+async function submitNewJob() {
+  const fail = (msg, focusId) => {
+    showModalNotice(msg);
+    if (focusId) $(focusId).focus();
+  };
+
+  const { files, suspicious } = parseScenePaths($("f-scene-files").value);
+  if (!files.length) return fail("Add at least one scene file (one .max path per line).", "f-scene-files");
+  if (!cleanPathText($("f-output-folder").value)) return fail("Output folder is required.", "f-output-folder");
+  const rangeExpr = $("f-row-range").value.trim();
+  if (!isValidRowRangeExpr(rangeExpr)) {
+    return fail('Row Range must look like "2,4-7,10" (row 1 is the header, so numbers start at 2).', "f-row-range");
+  }
+  if ($("f-camera-mode").value === "by_name" && !$("f-camera-name").value.trim()) {
+    return fail('Camera Name is required for "Render Camera By Name".', "f-camera-name");
+  }
+  if (suspicious.length) {
+    const shown = suspicious.slice(0, 5).join("\n") + (suspicious.length > 5 ? "\n…" : "");
+    if (!confirm(`${suspicious.length} line(s) don't end in .max:\n\n${shown}\n\nSubmit anyway?`)) return;
+  }
+
+  // No field is ever "mixed" in new mode, so computeSave() yields the full
+  // render/output dicts (blank number inputs are omitted → schema defaults).
+  const settings = computeSave();
+  const body = {
+    schema_version: 1,
+    request_id: "",            // server mints a uuid
+    max_files: files,
+    load_scene: true,
+    render: settings.render || {},
+    output: settings.output || {},
+    render_range_expr: rangeExpr,
+  };
+
+  const btn = $("edit-save");
+  btn.disabled = true;
+  try {
+    const r = await postAdmin("/submit", body);
+    saveNewJobMemory({ render: body.render, output: body.output });
+    const n = (r && r.count != null) ? r.count : files.length;
+    closeJobModal();   // also triggers the refresh that shows the new rows
+    toast(`Submitted ${n} job(s).`);
+  } catch (e) {
+    showModalNotice("Submit failed: " + e.message);
+  } finally {
+    btn.disabled = false;
   }
 }
 
@@ -1180,13 +1508,13 @@ function onEditFieldInput(ev) {
 
 function onEditOverlayClick(ev) {
   // Click on the dimmed backdrop (not the modal card itself) closes the modal.
-  if (ev.target === $("edit-overlay")) closeEditModal();
+  if (ev.target === $("edit-overlay")) closeJobModal();
 }
 
 function onKeydown(ev) {
   if (ev.key !== "Escape") return;
   if (!ctxMenuEl().hidden) { closeCtxMenu(); return; }
-  if (editingJobIds.length) closeEditModal();
+  if (modalMode) closeJobModal();
 }
 
 // ── Job row context menu (right-click) ─────────────────────────────────────────
@@ -1475,9 +1803,19 @@ function wire() {
   });
   document.addEventListener("scroll", closeCtxMenu, true);
   window.addEventListener("resize", closeCtxMenu);
-  $("edit-close").addEventListener("click", closeEditModal);
-  $("edit-cancel").addEventListener("click", closeEditModal);
-  $("edit-save").addEventListener("click", saveEditModal);
+  $("btn-new-job").addEventListener("click", openNewJobModal);
+  $("edit-close").addEventListener("click", closeJobModal);
+  $("edit-cancel").addEventListener("click", closeJobModal);
+  $("edit-save").addEventListener("click", onSaveClick);
+  $("f-scene-files").addEventListener("input", updateSceneHint);
+  $("f-row-range").addEventListener("input", syncRowRangeValidity);
+  $("f-scene-browse").addEventListener("click", browseScenes);
+  $("f-folder-browse").addEventListener("click", browseOutputFolder);
+  $("f-scene-files").addEventListener("paste", onScenePaste);
+  $("f-output-folder").addEventListener("paste", onFolderPaste);
+  $("f-output-folder").addEventListener("change", onFolderChange);
+  window.addEventListener("pywebviewready", revealNativePickers);
+  revealNativePickers();   // in case the API was injected before wire() ran
   $("edit-overlay").addEventListener("click", onEditOverlayClick);
   // Any field interaction marks it touched (so a previously-mixed field is
   // written on save). Delegated so it covers every f-* control. input fires

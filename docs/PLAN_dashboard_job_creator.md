@@ -1,6 +1,25 @@
 # PLAN: Dashboard Job Creator ("New Job" in the server UI)
 
-## Status: PROPOSED (implement after PLAN_fallback_camera_by_name)
+## Status: IMPLEMENTED (2026-09-28)
+
+Shipped as described below, with these deviations:
+
+- One modal, two modes: the Edit Job modal itself is reused (`modalMode`
+  "edit" / "new") instead of cloning its fieldsets, so the forms can't drift.
+- Row Range **is** included: a single `render_range_expr` applied to every
+  scene in the submission. It is just a string the schema already accepts, so
+  it needed no upload handling. It stays hidden in edit mode because
+  `/admin/jobs/update` doesn't take it.
+- Render/output settings from the last submission are remembered per browser
+  in `localStorage` (`vb_new_job_form`); the scene list and row range are not.
+- Lines that don't end in `.max` are flagged in the hint and confirmed on
+  submit rather than blocked.
+- Inside the `--ui` window, **Browse…** buttons open native Explorer dialogs
+  (scenes: multi-select `.max`; output: folder) via pywebview `js_api`. They
+  stay hidden in a plain browser, which cannot expose full paths. The window
+  now runs with `private_mode=False` so the remembered settings persist.
+- OCIO overrides and per-scene variation JSON / CSV overrides remain out of
+  scope, as planned.
 
 ## Goal
 
