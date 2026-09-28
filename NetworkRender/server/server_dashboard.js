@@ -144,10 +144,16 @@ function fmtTime(ts) {
   } catch { return "—"; }
 }
 
+// HTML-escape for both element content and attribute values. Quotes must be
+// escaped too: error text (which often quotes paths) is embedded in
+// data-copy="…" and title="…" attributes.
 function esc(s) {
-  const d = document.createElement("div");
-  d.textContent = String(s == null ? "" : s);
-  return d.innerHTML;
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 // Clipboard glyph for the copy-output-path button.
@@ -162,6 +168,15 @@ const EDIT_ICON = `<svg viewBox="0 0 16 16" width="13" height="13" fill="none" s
 // Windows-native (backslash) form so the copied value pastes straight into Explorer.
 function toNativePath(p) {
   return String(p || "").replace(/\//g, "\\");
+}
+
+// Folder containing a file (either slash style). The scene copy button copies
+// this instead of the full scene path: pasting a .max path into Explorer's
+// address bar would launch 3ds Max, pasting the folder just opens it.
+function parentDir(p) {
+  const s = String(p || "");
+  const i = Math.max(s.lastIndexOf("/"), s.lastIndexOf("\\"));
+  return i > 0 ? s.slice(0, i) : "";
 }
 
 // Clipboard write with a fallback for non-secure contexts. The dashboard is
@@ -384,7 +399,18 @@ function renderJobs(jobs) {
     const outCell = outFolder
       ? `<div class="out-wrap">
           <span class="out-path" title="${esc(outFolder)}">${esc(shortPath(outFolder))}</span>
-          <button class="copy-btn" data-copy="${esc(outFolder)}" title="Copy path for Explorer" aria-label="Copy output path">${COPY_ICON}</button>
+          <button class="copy-btn" data-copy="${esc(outFolder)}" data-msg="Output path copied — paste into Explorer" title="Copy path for Explorer" aria-label="Copy output path">${COPY_ICON}</button>
+        </div>`
+      : `<span style="color:var(--text-muted)">—</span>`;
+    const sceneDir = parentDir(j.scene_path);
+    const sceneCell = `<div class="cell-copy">
+          <span class="cell-text" title="${esc(j.scene_path)}">${esc(j.scene_name || "—")}</span>
+          ${sceneDir ? `<button class="copy-btn" data-copy="${esc(sceneDir)}" data-msg="Scene folder copied — paste into Explorer" title="Copy scene folder for Explorer" aria-label="Copy scene folder">${COPY_ICON}</button>` : ""}
+        </div>`;
+    const errCell = j.last_error
+      ? `<div class="cell-copy">
+          <span class="cell-text err-text" title="${esc(j.last_error)}">${esc(j.last_error)}</span>
+          <button class="copy-btn" data-copy="${esc(j.last_error)}" data-raw="1" data-msg="Error copied" title="Copy full error text" aria-label="Copy error text">${COPY_ICON}</button>
         </div>`
       : `<span style="color:var(--text-muted)">—</span>`;
     const rowCls = selCls
@@ -399,14 +425,14 @@ function renderJobs(jobs) {
       : statusChip(j.status);
     return `<tr class="${rowCls.trim()}" data-job-id="${esc(j.job_id)}"${dragAttr}>
       <td class="col-grip">${grip}</td>
-      <td title="${esc(j.scene_path)}">${esc(j.scene_name || "—")}</td>
+      <td class="col-scene">${sceneCell}</td>
       <td class="col-output">${outCell}</td>
       <td>${statusCell}</td>
       <td>${workerCell(j.worker_name || null)}</td>
       <td title="${esc(tip)}" style="font-variant-numeric:tabular-nums">${esc(fmtDuration(j.duration_seconds))}</td>
       <td style="color:var(--text-muted)">${esc(j.attempts)}</td>
       <td style="color:var(--text-muted);font-size:0.75rem">${esc(fmtTime(j.updated_at_ts))}</td>
-      <td title="${esc(j.last_error)}" style="color:var(--red);font-size:0.75rem;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(j.last_error || "—")}</td>
+      <td class="col-error">${errCell}</td>
       <td class="col-edit"><button class="edit-btn" data-edit="${esc(j.job_id)}" title="Edit render/output settings" aria-label="Edit job settings">${EDIT_ICON}</button></td>
     </tr>`;
   }).join("");
@@ -858,6 +884,13 @@ function syncOverrideBlock() {
   $("f-settings-block").hidden = !(c.checked || c.indeterminate);
 }
 
+// Show the Camera Name row only when it applies: mode is "by_name", or the
+// selection is mixed (so the field stays reachable, like the override block).
+function syncCameraNameRow() {
+  const v = $("f-camera-mode").value;
+  $("f-camera-name-row").hidden = !(v === "by_name" || v === MIXED);
+}
+
 // Repopulate the Bit Depth dropdown for the chosen format and toggle the alpha
 // row (hidden for jpg). Keeps the previously selected index when still valid.
 // When `desiredDepthIndex` is MIXED, a synthetic mixed option is shown instead.
@@ -1010,10 +1043,13 @@ function openEditModal(primaryId) {
   fillInput("f-resolution",  R("resolution"));
   fillInput("f-pass-limit",  R("pass_limit"));
   fillInput("f-noise-limit", R("noise_limit"));
-  fillSelect("f-camera-mode", R("fallback_camera_mode").map((v) => (v === "active") ? "active" : "all"));
+  fillSelect("f-camera-mode", R("fallback_camera_mode").map((v) =>
+    (v === "active" || v === "by_name") ? v : "all"));
+  fillInput("f-camera-name", R("fallback_camera_name").map((v) => v || ""));
   fillCheck("f-use-variations",    R("use_variations").map(Boolean));
   fillCheck("f-override-settings", R("override_settings").map(Boolean));
   syncOverrideBlock();
+  syncCameraNameRow();
 
   // Output fields. version null → "" (the "None" option).
   fillInput("f-output-folder", O("folder").map((v) => v || ""));
@@ -1083,6 +1119,7 @@ function computeSave() {
   set(render, "pass_limit",  pickVal("f-pass-limit",  (v) => v.trim() === "" ? undefined : Number(v)));
   set(render, "noise_limit", pickVal("f-noise-limit", (v) => v.trim() === "" ? undefined : Number(v)));
   set(render, "fallback_camera_mode", pickVal("f-camera-mode"));
+  set(render, "fallback_camera_name", pickVal("f-camera-name", (v) => v.trim()));
   set(render, "use_variations",    checkVal("f-use-variations"));
   set(render, "override_settings", checkVal("f-override-settings"));
 
@@ -1214,11 +1251,12 @@ function openCtxMenu(x, y) {
 }
 
 // Output path (Windows-native) for the menu's target row, or "" if none.
+// Read from the snapshot, not the DOM: rows now hold several copy buttons
+// (scene folder, output, error), so scraping the first one would be wrong.
 function ctxCopyPath() {
   if (!ctxRowId) return "";
-  const tr = $("tbody-jobs").querySelector(`tr[data-job-id="${ctxRowId}"]`);
-  const btn = tr && tr.querySelector(".copy-btn");
-  return btn ? toNativePath(btn.getAttribute("data-copy") || "") : "";
+  const j = findJob(ctxRowId);
+  return j ? toNativePath(j.output_folder || "") : "";
 }
 
 function onCtxMenuClick(ev) {
@@ -1234,9 +1272,8 @@ function onCtxMenuClick(ev) {
     case "unfreeze": actSetFrozenSelected(false); break;
     case "remove":   actRemoveSelected(); break;
     case "copy": {
-      const tr = $("tbody-jobs").querySelector(`tr[data-job-id="${targetRow}"]`);
-      const btn = tr && tr.querySelector(".copy-btn");
-      const native = btn ? toNativePath(btn.getAttribute("data-copy") || "") : "";
+      const j = findJob(targetRow);
+      const native = j ? toNativePath(j.output_folder || "") : "";
       if (native) {
         copyText(native).then((ok) =>
           toast(ok ? "Output path copied — paste into Explorer" : "Copy failed", !ok));
@@ -1262,13 +1299,16 @@ function applySelectionClasses() {
 }
 
 function onTbodyClick(ev) {
-  // Copy-output-path button: act and bail, never affects row selection.
+  // Copy button: act and bail, never affects row selection. Paths are copied
+  // in Windows-native form for Explorer; data-raw payloads (error text) are
+  // copied verbatim.
   const copyBtn = ev.target.closest(".copy-btn");
   if (copyBtn) {
-    const native = toNativePath(copyBtn.getAttribute("data-copy") || "");
-    if (native) {
-      copyText(native).then((ok) =>
-        toast(ok ? "Output path copied — paste into Explorer" : "Copy failed", !ok)
+    const raw = copyBtn.getAttribute("data-copy") || "";
+    const text = copyBtn.dataset.raw === "1" ? raw : toNativePath(raw);
+    if (text) {
+      copyText(text).then((ok) =>
+        toast(ok ? (copyBtn.dataset.msg || "Copied.") : "Copy failed", !ok)
       );
     }
     return;
@@ -1445,6 +1485,7 @@ function wire() {
   $("edit-overlay").addEventListener("input", onEditFieldInput);
   $("edit-overlay").addEventListener("change", onEditFieldInput);
   $("f-override-settings").addEventListener("change", syncOverrideBlock);
+  $("f-camera-mode").addEventListener("change", syncCameraNameRow);
   $("f-output-format").addEventListener("change", () => syncFormatDependents());
   document.addEventListener("keydown", onKeydown);
 }

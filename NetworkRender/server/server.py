@@ -937,6 +937,7 @@ def build_dashboard_payload(server):
                 "noise_limit": float(render_settings.get("noise_limit", 6.0) or 0.0),
                 "use_variations": bool(render_settings.get("use_variations", True)),
                 "fallback_camera_mode": str(render_settings.get("fallback_camera_mode", "all") or "all"),
+                "fallback_camera_name": str(render_settings.get("fallback_camera_name", "") or ""),
             },
             "output": {
                 "folder": output_folder,

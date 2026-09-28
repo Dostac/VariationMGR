@@ -1,6 +1,7 @@
 import os
 import json
 import uuid
+import difflib
 import datetime
 import importlib.util
 import job_schema as schema
@@ -149,6 +150,41 @@ def _resolve_name(
     for key, value in row_data.items():
         result = result.replace(f"[{key}]", str(value))
     return result
+
+
+def match_camera_by_name(names, query):
+    """Find the best loose match for query among camera names.
+
+    Case-insensitive. An exact match wins outright; otherwise substring
+    containment in either direction ("Detail" -> "Detailbeeld"), ranked by
+    similarity; otherwise the most similar name if it clears a 0.6 ratio.
+    Ties break on shorter name, then alphabetically, so the pick is
+    deterministic. Returns (index, kind) with kind in
+    ("exact", "substring", "fuzzy"), or None if nothing matches.
+    """
+    query_ci = str(query or "").strip().lower()
+    if not query_ci:
+        return None
+
+    substrings = []   # (-ratio, len(name), name, index): min() = best
+    fuzzies = []
+    for idx, name in enumerate(names):
+        name_ci = str(name or "").strip().lower()
+        if not name_ci:
+            continue
+        if name_ci == query_ci:
+            return (idx, "exact")
+        ratio = difflib.SequenceMatcher(None, query_ci, name_ci).ratio()
+        entry = (-ratio, len(name_ci), name_ci, idx)
+        if query_ci in name_ci or name_ci in query_ci:
+            substrings.append(entry)
+        elif ratio >= 0.6:
+            fuzzies.append(entry)
+
+    for candidates, kind in ((substrings, "substring"), (fuzzies, "fuzzy")):
+        if candidates:
+            return (min(candidates)[3], kind)
+    return None
 
 
 def has_max_runtime():
@@ -656,6 +692,19 @@ class BatchRendererCore:
             if render_cfg["fallback_camera_mode"] == "all":
                 for cam in list(rt.getCoronaCamsInScene()):
                     jobs.append((cam, f"{base_name}_{cam.name}"))
+            elif render_cfg["fallback_camera_mode"] == "by_name":
+                query = render_cfg["fallback_camera_name"]
+                cams = list(rt.getCoronaCamsInScene())
+                hit = match_camera_by_name([c.name for c in cams], query)
+                if hit:
+                    cam = cams[hit[0]]
+                    self.log(f"  Camera match: '{query}' -> '{cam.name}' ({hit[1]})")
+                    jobs.append((cam, f"{base_name}_{cam.name}"))
+                else:
+                    cam_list = ", ".join(c.name for c in cams) or "none"
+                    self.log(
+                        f"  Warning: No camera matching '{query}' "
+                        f"(scene has: {cam_list}).")
             else:
                 cam = rt.getRenderCamera()
                 if cam:

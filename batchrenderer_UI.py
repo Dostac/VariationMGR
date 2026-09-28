@@ -202,8 +202,19 @@ class BatchRenderDialog(QtWidgets.QDialog):
 
         rend_vbox.addWidget(QtWidgets.QLabel("Fallback Camera Mode:"))
         self.cmb_mode = _ctrl(QtWidgets.QComboBox())
-        self.cmb_mode.addItems(["Render All Cameras", "Render Active View Only"])
+        self.cmb_mode.addItems([
+            "Render All Cameras",
+            "Render Active View Only",
+            "Render Camera By Name",
+        ])
         rend_vbox.addWidget(self.cmb_mode)
+
+        self.le_fallback_cam = _ctrl(QtWidgets.QLineEdit())
+        self.le_fallback_cam.setPlaceholderText("e.g. Detail")
+        self.le_fallback_cam.setToolTip(
+            "Loosely matched per scene: 'Detail' finds 'Detailbeeld' or 'Detail'.")
+        rend_vbox.addWidget(self.le_fallback_cam)
+        self.le_fallback_cam.setVisible(False)
 
         main_layout.addWidget(gb_rend)
 
@@ -365,6 +376,8 @@ class BatchRenderDialog(QtWidgets.QDialog):
 
         self.chk_override_settings.toggled.connect(
             lambda v: self.widget_settings.setVisible(v))
+        self.cmb_mode.currentIndexChanged.connect(
+            lambda i: self.le_fallback_cam.setVisible(i == 2))
 
         self.chk_ocio_override.stateChanged.connect(self.toggle_ocio_ui)
         self.cmb_ocio_mode.currentIndexChanged.connect(self.update_ocio_visibility)
@@ -436,6 +449,7 @@ class BatchRenderDialog(QtWidgets.QDialog):
             self.le_path.editingFinished,
             self.cmb_version.currentIndexChanged,
             self.cmb_mode.currentIndexChanged,
+            self.le_fallback_cam.editingFinished,
             self.chk_override_settings.stateChanged,
             self.spn_res.valueChanged,
             self.spn_passes.valueChanged,
@@ -984,6 +998,7 @@ class BatchRenderDialog(QtWidgets.QDialog):
         rt.setINISetting(ini, S, "LastFormat",       self.cmb_ext.currentText())
         rt.setINISetting(ini, S, "LastVersion",      self.cmb_version.currentText())
         rt.setINISetting(ini, S, "RenderMode",       str(self.cmb_mode.currentIndex()))
+        rt.setINISetting(ini, S, "FallbackCameraName", self.le_fallback_cam.text().strip())
         rt.setINISetting(ini, S, "OverrideSettings", str(self.chk_override_settings.isChecked()))
         rt.setINISetting(ini, S, "Resolution",       str(self.spn_res.value()))
         rt.setINISetting(ini, S, "PassLimit",        str(self.spn_passes.value()))
@@ -1045,6 +1060,9 @@ class BatchRenderDialog(QtWidgets.QDialog):
         self.spn_passes.setValue( _int("Settings",   "PassLimit",   75))
         self.spn_noise.setValue( _float("Settings",  "NoiseLimit",  6.0))
         self.cmb_mode.setCurrentIndex(_int("Settings", "RenderMode", 0))
+        self.le_fallback_cam.setText(
+            rt.getINISetting(ini, "Settings", "FallbackCameraName") or "")
+        self.le_fallback_cam.setVisible(self.cmb_mode.currentIndex() == 2)
         self.chk_override_settings.setChecked(_bool("Settings", "OverrideSettings"))
         self.chk_use_variations.setChecked(   _bool("Settings", "UseVariations"))
         self.chk_re.setChecked(               _bool("Settings", "SaveRE"))
@@ -1188,8 +1206,9 @@ class BatchRenderDialog(QtWidgets.QDialog):
                 "noise_limit": self.spn_noise.value(),
                 "use_variations": self.chk_use_variations.isChecked(),
                 "fallback_camera_mode": (
-                    "all" if self.cmb_mode.currentIndex() == 0 else "active"
+                    ("all", "active", "by_name")[self.cmb_mode.currentIndex()]
                 ),
+                "fallback_camera_name": self.le_fallback_cam.text().strip(),
             },
             "ocio": {
                 "override": self.chk_ocio_override.isChecked(),

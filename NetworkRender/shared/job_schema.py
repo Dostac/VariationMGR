@@ -30,7 +30,8 @@ _DEFAULT_JOB_REQUEST = {
         "pass_limit": 75,
         "noise_limit": 6.0,
         "use_variations": True,
-        "fallback_camera_mode": "all",  # "all" | "active"
+        "fallback_camera_mode": "all",  # "all" | "active" | "by_name"
+        "fallback_camera_name": "",     # loose-match query for "by_name" mode
     },
     "ocio": {
         "override": False,
@@ -178,13 +179,19 @@ def normalize_job_request(job_request):
     fallback_mode = str(
         render_in.get("fallback_camera_mode", render_in.get("camera_mode", render["fallback_camera_mode"]))
     ).lower()
-    if fallback_mode not in ("all", "active"):
+    if fallback_mode not in ("all", "active", "by_name"):
         legacy_mode = render_in.get("render_mode", None)
         if legacy_mode is not None:
             fallback_mode = "all" if _int(legacy_mode, 0) == 0 else "active"
         else:
             fallback_mode = "all"
+    fallback_name = str(
+        render_in.get("fallback_camera_name", render["fallback_camera_name"]) or ""
+    ).strip()
+    if fallback_mode == "by_name" and not fallback_name:
+        fallback_mode = "all"
     render["fallback_camera_mode"] = fallback_mode
+    render["fallback_camera_name"] = fallback_name
 
     ocio_in = job_request.get("ocio", {})
     if not isinstance(ocio_in, dict):

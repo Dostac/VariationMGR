@@ -248,7 +248,13 @@
               <select id="f-camera-mode" class="select">
                 <option value="all">Render All Cameras</option>
                 <option value="active">Render Active View Only</option>
+                <option value="by_name">Render Camera By Name</option>
               </select>
+            </div>
+            <div class="form-row" id="f-camera-name-row" hidden>
+              <label class="field-label" for="f-camera-name">Camera Name:</label>
+              <input type="text" id="f-camera-name" class="input" placeholder="e.g. Detail"
+                     title="Loosely matched per scene: 'Detail' finds 'Detailbeeld' or 'Detail'.">
             </div>
           </fieldset>
 

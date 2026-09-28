@@ -793,6 +793,33 @@ tbody tr.selected:hover td { background: rgba(121,192,255,0.16); }
   color: var(--text);
 }
 
+/* Scene / error cells: truncated text + copy button, same pattern as output.
+   The max-width lives on this wrapper because auto table layout ignores
+   max-width on the td itself — a long unbreakable string (e.g. a path inside
+   an error message) would otherwise push the cell, and the whole table, out
+   of the panel. */
+.cell-copy {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.cell-copy .cell-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.col-scene .cell-copy { max-width: 280px; }
+
+.col-error .cell-copy { max-width: 200px; }
+
+.err-text {
+  color: var(--red);
+  font-size: 0.75rem;
+}
+
 /* Queue drag-reorder (Queued tab) */
 .drag-grip {
   display: inline-flex;
