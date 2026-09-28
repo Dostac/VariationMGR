@@ -1,8 +1,17 @@
-packaging/
+# Build outputs (the build tooling itself in packaging/ is tracked)
+packaging/dist/
+packaging/build/
+packaging/staging/
 dist/
 dist_new/
 build*/
+
 __pycache__/
 *.pyc
 *.pyo
+
+# Deprecated code kept on the NAS for reference only
 legacy/
+
+# Per-machine Claude Code permissions
+.claude/settings.local.json

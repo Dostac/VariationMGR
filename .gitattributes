@@ -1,0 +1,12 @@
+# Normalize text to LF in the repo and on checkout on every machine.
+* text=auto eol=lf
+
+# Never touch binaries
+*.max  binary
+*.exe  binary
+*.dll  binary
+*.pyd  binary
+*.png  binary
+*.jpg  binary
+*.ico  binary
+*.lnk  binary

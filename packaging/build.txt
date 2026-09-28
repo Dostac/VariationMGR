@@ -1,0 +1,1 @@
+pyinstaller --clean --noconfirm --workpath packaging\build --distpath packaging\dist packaging\Worker.spec
