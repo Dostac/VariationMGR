@@ -1,0 +1,246 @@
+/* Recipe submitter page. Loaded after server_dashboard.css, whose tokens,
+   buttons, panels, forms, modal and toast styles it reuses. */
+
+.wrap-wide { max-width: 1480px; }
+
+a.btn { text-decoration: none; }
+
+.recipe-select { min-height: 28px; min-width: 220px; font-size: 0.8125rem; }
+
+/* The recipes folder can be a long UNC path: clip it, full path in the tooltip. */
+#pill-folder {
+  display: block;
+  max-width: min(520px, 100%);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 24px;
+}
+.topbar .pill-row { min-width: 0; max-width: 100%; }
+
+.table-scroll { overflow-x: auto; max-width: 100%; }
+
+.btn-link {
+  border-color: transparent;
+  background: transparent;
+  color: var(--text-muted);
+}
+.btn-link:hover:not(:disabled) { color: var(--text); }
+
+/* ── Recipe header ───────────────────────────────────────────────────────── */
+
+.recipe-head { display: flex; flex-direction: column; gap: 8px; }
+.recipe-desc { margin: 0; color: var(--text-muted); font-size: 0.8125rem; }
+.recipe-desc:empty { display: none; }
+
+.sub-banner {
+  padding: 8px 11px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 0.78rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin-top: 10px;
+}
+.recipe-head .sub-banner { margin-top: 0; }
+.sub-banner[hidden] { display: none; }
+.sub-banner ul { margin: 0; padding-left: 18px; }
+.sub-banner-error { border-color: var(--red); background: var(--red-bg); color: var(--red); }
+/* Recipe load errors carry a short traceback: keep its columns aligned. */
+#recipe-error { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 0.75rem; }
+.sub-banner-warn  { border-color: var(--orange); background: var(--orange-bg); color: var(--orange); }
+.sub-banner-ok    { border-color: var(--green); background: var(--green-bg); color: var(--green); }
+.sub-banner a { color: inherit; font-weight: 600; }
+
+/* ── Layout ──────────────────────────────────────────────────────────────── */
+
+.sub-cols {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: 12px;
+  align-items: start;
+}
+.sub-main, .sub-side { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+
+@media (max-width: 1000px) {
+  .sub-cols { grid-template-columns: minmax(0, 1fr); }
+}
+
+.panel h2 { display: inline-flex; align-items: center; gap: 8px; }
+.sub-side .panel > h2 { margin-bottom: 4px; }
+
+.count-badge {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  padding: 1px 7px;
+  border-radius: var(--radius-pill);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+}
+
+.input-source { font-size: 0.72rem; color: var(--text-dim); margin-top: 6px; }
+.input-source:empty { display: none; }
+
+/* ── Input grid ──────────────────────────────────────────────────────────── */
+
+.grid-wrap {
+  margin-top: 10px;
+  max-height: 60vh;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.t-grid { font-size: 0.78rem; }
+.t-grid th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg-section);
+  white-space: nowrap;
+}
+.t-grid th .req { color: var(--orange); margin-left: 2px; }
+.t-grid td { padding: 3px 6px; }
+.t-grid tbody tr:hover td { background: transparent; }
+.t-grid tr.off td { opacity: 0.45; }
+.t-grid .col-tick { width: 28px; text-align: center; }
+.t-grid .col-num  { width: 34px; color: var(--text-dim); text-align: right; font-variant-numeric: tabular-nums; }
+.t-grid .col-del  { width: 28px; text-align: center; }
+.t-grid input[type="checkbox"] { accent-color: var(--blue); margin: 0; }
+
+.cell-input, .cell-select {
+  width: 100%;
+  min-width: 90px;
+  min-height: 24px;
+  padding: 0 6px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text);
+  font-size: 0.78rem;
+  font-family: inherit;
+}
+.cell-input:hover, .cell-select:hover { border-color: var(--border); }
+.cell-input:focus, .cell-select:focus { outline: none; border-color: var(--blue); background: var(--bg-card); }
+.cell-select { cursor: pointer; background: var(--bg-card); border-color: var(--border); }
+.cell-select option { background: var(--bg-card); }
+.cell-readonly { padding: 0 7px; white-space: nowrap; }
+.cell-bad { border-color: var(--orange) !important; color: var(--orange); }
+.cell-empty-req { border-color: var(--red) !important; }
+
+.cell-swatch { display: flex; align-items: center; gap: 6px; }
+.swatch {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  border: 1px solid var(--border-hi);
+  background: transparent;
+}
+
+.row-del {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 1rem;
+  line-height: 1;
+}
+.row-del:hover { color: var(--red); border-color: var(--border); }
+
+.grid-empty { color: var(--text-muted); text-align: center; padding: 24px 12px !important; }
+
+/* ── Preview ─────────────────────────────────────────────────────────────── */
+
+.preview-status { font-size: 0.75rem; color: var(--text-muted); margin-right: auto; }
+.preview-status.busy { color: var(--blue); }
+.preview-status.bad  { color: var(--red); }
+
+.t-preview { margin-top: 10px; font-size: 0.78rem; }
+.t-preview td { padding: 6px 9px; }
+.t-preview .num { text-align: right; font-variant-numeric: tabular-nums; }
+.t-preview .scene-key { font-weight: 600; }
+.t-preview .scene-sub { color: var(--text-dim); font-size: 0.7rem; }
+.t-preview .file { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); }
+.t-preview .file.missing { color: var(--red); }
+.t-preview .ranges { color: var(--text-muted); font-size: 0.72rem; }
+.t-preview tfoot td { font-weight: 600; border-top: 1px solid var(--border); border-bottom: none; }
+
+.recipe-log { margin-top: 10px; font-size: 0.75rem; color: var(--text-muted); }
+.recipe-log[hidden] { display: none; }
+.recipe-log pre {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  white-space: pre-wrap;
+  font-size: 0.72rem;
+}
+
+/* ── Side forms ──────────────────────────────────────────────────────────── */
+
+.settings-form, #options-form { display: flex; flex-direction: column; }
+.sub-side .form-row { grid-template-columns: 110px minmax(0, 1fr); }
+.sub-side .select { width: 100%; min-height: 28px; }
+.sub-side .select:focus { outline: none; border-color: var(--blue); }
+.sub-side .form-block:first-child, .sub-side .form-row:first-child { margin-top: 6px; }
+.form-divider { height: 1px; background: var(--border); margin: 12px 0 10px; }
+.option-hint { margin-top: 3px; }
+
+/* ── History ─────────────────────────────────────────────────────────────── */
+
+.history { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.history-empty { font-size: 0.75rem; color: var(--text-dim); }
+.history-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-card);
+  font-size: 0.75rem;
+}
+.history-main { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.history-when { color: var(--text); }
+.history-meta { color: var(--text-muted); font-size: 0.7rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ── Editor modal ────────────────────────────────────────────────────────── */
+
+.modal-editor { width: min(1100px, 100%); height: calc(100vh - 40px); }
+.modal-editor .modal-head h3 { flex-shrink: 0; }
+.modal-small { width: min(440px, 100%); }
+.editor-path {
+  font-size: 0.72rem;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.modal-editor .modal-warn { white-space: pre-wrap; font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; }
+.editor-text {
+  flex: 1;
+  margin: 12px 16px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text);
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  tab-size: 4;
+  white-space: pre;
+  overflow: auto;
+  resize: none;
+}
+.editor-text:focus { outline: none; border-color: var(--blue); }
+.editor-hint { margin-right: auto; align-self: center; font-size: 0.72rem; color: var(--text-dim); }
+.modal-foot .editor-hint { margin-right: auto; }

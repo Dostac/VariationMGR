@@ -87,6 +87,9 @@ body {
   background: var(--green);
 }
 
+.hero-badge.paused { border-color: var(--orange); color: var(--orange); background: var(--orange-bg); }
+.hero-badge.paused::before { background: var(--orange); }
+
 .topbar .pill-row {
   display: flex;
   align-items: center;
@@ -212,6 +215,30 @@ body {
   font-size: 0.8125rem;
   color: var(--text-muted);
   margin-bottom: 10px;
+}
+
+/* Done count left, ETA right, bottoms aligned. */
+.progress-row {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.progress-eta { text-align: right; margin-bottom: 10px; }
+
+.eta-value {
+  font-size: 1.5rem;
+  font-weight: 700;
+  line-height: 1.1;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.eta-value.paused { color: var(--orange); }
+
+.eta-label {
+  font-size: 0.75rem;
+  color: var(--text-muted);
 }
 
 .progress {
@@ -414,6 +441,31 @@ body {
 
 .btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
+/* Queue Pause/Resume: a fixed square, icon over label, sized so it stands out
+   from the status pills next to it. Fixed width keeps it from jumping when
+   the label switches between "Pause" and "Resume". */
+.btn-pause-big {
+  flex-direction: column;
+  gap: 5px;
+  width: 76px;
+  height: 76px;
+  margin-left: 4px;
+  padding: 0;
+  border-width: 1.5px;
+  border-radius: var(--radius-lg);
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+.btn-pause-big .pause-icon { display: inline-flex; }
+.btn-pause-big.is-paused {
+  background: var(--green-bg);
+  color: var(--green);
+  border-color: var(--green);
+}
+.btn-pause-big.is-paused:hover:not(:disabled) { background: rgba(63, 185, 80, 0.2); }
+
+a.btn { text-decoration: none; }
+
 .btn-tonal {
   background: var(--blue-bg);
   color: var(--blue);
@@ -464,6 +516,34 @@ body {
 }
 
 /* ── Performance panel ───────────────────────────────────────────────────── */
+
+/* Collapsible panel header (Performance): the title is the toggle. */
+.panel-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 2px 6px 2px 2px;
+  margin-left: -2px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.panel-toggle:hover { background: var(--bg-card); border-color: var(--border); }
+.panel-toggle:focus-visible { outline: none; border-color: var(--blue); }
+.panel-toggle .chev {
+  width: 7px;
+  height: 7px;
+  border-right: 1.5px solid var(--text-muted);
+  border-bottom: 1.5px solid var(--text-muted);
+  transform: translateY(-2px) rotate(45deg);
+  transition: transform 0.15s;
+}
+.panel.collapsed .panel-toggle .chev { transform: rotate(-45deg); }
+.panel.collapsed #perf-body,
+.panel.collapsed .perf-filters { display: none; }
 
 .perf-filters {
   flex-wrap: wrap;
@@ -826,6 +906,20 @@ tbody tr.selected:hover td { background: rgba(121,192,255,0.16); }
 .col-scene .cell-copy { max-width: 280px; }
 
 .col-error .cell-copy { max-width: 200px; }
+
+/* The wrapper caps above only limit each cell's own text. The Output path had
+   no cap, so a job with an error (which widens its column) pushed the sum
+   of the columns past the panel and the table spilled out. max-width:0 plus a
+   percentage width makes these three columns share the space left over after
+   the fixed-content columns, and truncate with an ellipsis instead of
+   growing. The flex text spans need min-width:0 to be allowed to shrink. */
+.t-jobs td.col-scene  { max-width: 0; width: 24%; }
+.t-jobs td.col-output { max-width: 0; width: 30%; }
+.t-jobs td.col-error  { max-width: 0; width: 16%; }
+.cell-copy .cell-text,
+.col-output .out-path { min-width: 0; }
+
+.jobs-table-wrap { overflow-x: auto; max-width: 100%; }
 
 .err-text {
   color: var(--red);

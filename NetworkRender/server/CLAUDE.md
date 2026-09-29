@@ -11,7 +11,7 @@ State is protected by a re-entrant lock and persisted as JSON with atomic file r
 
 ### CLI
 
-`python server.py [--host HOST] [--port PORT] [--state-file PATH] [--allow-non-local] [--no-discovery] [--ui]`
+`python server.py [--host HOST] [--port PORT] [--state-file PATH] [--recipes-dir PATH] [--allow-non-local] [--no-discovery] [--ui]`
 
 Without `--ui` the server runs headless (just the HTTP API + web dashboard). With
 `--ui` it additionally opens the web dashboard in a native window via pywebview
@@ -77,6 +77,17 @@ The dashboard is plain HTML/CSS/JS served by the HTTP API and rendered by
 `/dashboard_data` and drives every control through the `/admin/*` endpoints:
 worker table, job table (with a per-row copy-output-path button), progress, and
 performance charts.
+
+The top bar holds only the title, a status badge that reads Active or Paused
+(orange), and the big square Pause/Resume button (`renderPauseButton`). The
+old HTTP / workers / queue / ETA / last-updated pills were removed as noise.
+The ETA now sits in the progress panel, next to the done count (`eta-value` /
+`eta-label`). A failed poll still raises an error toast, so no "last updated"
+clock is needed. The Performance panel collapses from its title
+(`togglePerfPanel`). The state is kept in localStorage as `vb_perf_collapsed`,
+and the charts are not rendered while collapsed. In the job table, the Scene,
+Output and Error columns use `max-width:0` plus percentage widths so long
+values truncate instead of pushing the table out of its panel.
 
 On the **Queued** tab, rows are shown in true queue order (`queue_position` from
 the payload) and can be dragged to reorder; the drop commits via
@@ -180,8 +191,72 @@ multi-select edit writes it.
 `http://127.0.0.1:<port>/`. Closing the window stops the server. The window is
 created with `js_api=_DashboardNativeApi()` (native pickers, above) and started
 with `private_mode=False` and a `storage_path` under the state file's folder
-(`.../webview`), so the page's localStorage survives restarts.
+(`.../webview`), so the page's localStorage survives restarts. It also sets
+`webview.settings["ALLOW_DOWNLOADS"] = True` so the Submitter's "Download
+payloads" works inside the window.
 
 Note: a browser/WebView cannot open Explorer on the host, so the old native
 "open output folder" action is replaced by a copy-path button (copies the
 Windows-native `\\…` path to the clipboard, ready to paste into Explorer).
+
+## Recipe Submitter (`/submitter`)
+
+A second page for complex submissions. A per-project **recipe** (a `.py` file)
+turns a client table into VariationMGR rows per scene. The server pools them,
+splits them and queues them. The authoring contract for recipes is in
+[docs/SUBMITTER_RECIPES.md](../../docs/SUBMITTER_RECIPES.md). The dashboard
+links to the page from a "Submitter" button next to "+ New Job".
+
+- `recipe_api.py`: the public recipe API (`Scene`, `Column`, `Choice`/`Text`/
+  `Folder`/`Number`/`Toggle`, `FolderScan`, `Row`, `Jobs`, `RecipeError`,
+  `unique`). It is registered as `sys.modules["vb_recipe"]`, so recipes write
+  `from vb_recipe import *`. It also imports the stdlib modules recipes are
+  likely to use (csv, re, math, random…) so the frozen exe bundles them.
+- `submitter.py` contains:
+  - `RecipeStore`: the recipes folder, the `<id>.state.json` working copy, the
+    `_submissions/` archive, and first-run seeding from `submitter_recipes/`
+    (only when the folder does not exist yet).
+  - The pipeline `run_recipe()`: validate rows, run `build()` in a thread with
+    a 30 s timeout, pool per scene key, then split into chunks. Each chunk
+    carries the **full** table plus `render_range_expr` and the legacy
+    `render_range`. Settings merge schema < recipe DEFAULTS < page < per-scene
+    override, then go through `normalize_job_request`.
+  - CSV parsing (`,` `;` or tab; utf-8-sig then cp1252) and the folder scan
+    with value merge.
+  - `SubmitterAPI`, which serves all `/submitter/api/*` routes and returns
+    `(status, body)`.
+  - A CLI: `python -m NetworkRender.server.submitter RECIPE.py CSV ...`.
+- Recipes are exec'd fresh from disk on every call, with no caching. Edits
+  from the browser editor or VS Code apply without a restart.
+  `use_variations` is forced on, because a csv_override is ignored otherwise.
+- `submitter.html` / `.css` / `.js` make up the page. It loads
+  `server_dashboard.css` first for tokens and components. The grid uses
+  delegated events on plain DOM, with no framework. The preview re-runs
+  server-side on a 450 ms debounce. The working copy autosaves on a 900 ms
+  debounce, plus a keepalive flush on pagehide. The editor saves with an mtime
+  check, which returns 409 `changed_on_disk` unless `force` is set.
+- `JobServerState.submit_batch()` queues all of a submission's jobs under one
+  request id with one state save. It stores `{source, recipe, label}` on the
+  request record. `submit_request()` shares `_enqueue_scene_jobs_locked()`.
+- `--recipes-dir` defaults to `recipes/` next to the state file. Point it at
+  the NAS to share and version recipes. The editor is deliberately unlocked,
+  so anyone on the LAN can save recipe code that the server runs. This is a
+  trusted 5-person office, and the local-network filter is the only access
+  control wanted.
+- `packaging/Server.spec` ships the page files and `submitter_recipes/` as
+  datas.
+
+API routes (POSTs need the `X-VB-Request: 1` header, like `/admin/*`):
+
+- `GET /submitter/api/recipes`: list `{id, title, description, error}` plus the folder.
+- `GET /submitter/api/recipes/{id}`: `{source, mtime, state, meta, load_error}`.
+- `GET /submitter/api/recipes/{id}/history`, `GET /submitter/api/submissions/{file}`.
+- `GET /submitter/api/template`.
+- `POST /submitter/api/recipes/{id}/source` `{source, base_mtime, force, create}`.
+- `POST .../state` `{state}`, `.../load_csv` `{filename, data_b64}`, `.../scan` `{options, rows}`.
+- `POST .../preview` `{rows, options, settings, include_payloads}`, and `.../submit` with the same body plus `source_name`.
+
+Testing: `test_backend.py`-style urllib checks plus a Selenium/Edge headless
+click-through against a throwaway server (`--port 8799 --no-discovery
+--state-file <scratch>`). The recipes folder then lands next to the scratch
+state file, so the real one is never touched.

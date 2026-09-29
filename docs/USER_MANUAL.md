@@ -162,6 +162,7 @@ The built-in operators cover the main production cases:
 - `UnlitColorsOperator`: use a named color from a color-library CSV.
 - `MultiSubLibOperator`: swap materials from a `.mat` library.
 - `MatFromFolderOperator`: build material results from texture folders.
+- `MatFromFolderV2Operator`: same, but simpler — pick one material, its bitmaps are swapped in place per row, and patterns come from the bitmap names (COL, ROUGH, METAL …).
 - `XRefSceneOperator`: load scene content from external `.max` files. (currently broken)
 - `FloorGeneratorOperator`: drive floor and plank variations from table values.
 
@@ -747,7 +748,22 @@ The **Browse…** buttons appear only in the server window, because a normal bro
 3. Optionally limit the variation rows with **Row Range** (for example `2,4-7`; row 1 is the CSV header, so data starts at row 2). It applies to every scene in the submission.
 4. Press **Submit**. The jobs appear under the Queued tab straight away.
 
-Variation JSON / CSV overrides and OCIO output transforms cannot be set from the dashboard. Submit those from the Batch Renderer.
+Variation JSON / CSV overrides and OCIO output transforms cannot be set from the New Job form. Submit those from the Batch Renderer, or use the Submitter below.
+
+#### The Submitter: client tables to jobs
+
+Some projects need one client row to become renders in several scenes. For example, one fabric may need six lifestyle cameras, four headrails and two close-ups. The **Submitter** page handles this. Open it with the **Submitter** button next to `+ New Job`, or go to `http://<server>:8765/submitter`.
+
+Each project gets a **recipe**: a short Python file that says which scenes exist, which columns the client fills in, and how one row becomes rows per scene. Recipes are stored on the server, so everyone in the office uses the same ones. How to write one, or ask an AI to write one, is in `docs/SUBMITTER_RECIPES.md`.
+
+1. Pick the recipe at the top.
+2. Fill the grid. **Load CSV…** reads the client's file (comma or semicolon, straight from Excel). **Scan folder** lists a folder, for recipes that support it. **+ Row** adds a row by hand. Only ticked rows are rendered.
+3. Edit cells directly. To change many rows at once, tick them and use **Bulk edit…** to set a column or to randomize a dropdown column.
+4. Set the recipe options and the **Output & render** panel. **Rows per job** splits each scene's rows into several jobs, so several workers share one scene.
+5. Check the **Preview**. It updates as you edit and shows each scene's rows, jobs and split ranges, plus any problems. Red problems must be fixed first. Orange warnings are for information.
+6. Press **Submit**. All jobs land in the queue as one submission.
+
+The grid, options and settings are saved on the server as you work, so you can close the page and continue later. **Recent submissions** lists earlier runs, and **Restore** loads their inputs back in to render them again. **Edit recipe** opens the recipe's code in the browser. The same file can also be edited in VS Code from the recipes folder shown in the top bar.
 
 ## Practical Case-Based Workflows
 

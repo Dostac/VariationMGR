@@ -23,7 +23,11 @@ if __package__ is None or __package__ == "":
         sys.path.insert(0, str(repo_root))
 
 from NetworkRender.shared import job_schema as schema
-from NetworkRender.server.server_dashboard import read_js, read_stylesheet, render_dashboard
+from NetworkRender.server.server_dashboard import (
+    read_js, read_stylesheet, read_submitter_css, read_submitter_js,
+    render_dashboard, render_submitter,
+)
+from NetworkRender.server.submitter import RecipeStore, SubmitterAPI
 
 
 DISCOVERY_MAGIC = "VB_BATCH_DISCOVER_V1"
@@ -273,46 +277,77 @@ class JobServerState:
             raise ValueError("Request contains no scene jobs (scene_file/max_files missing).")
 
         request_id = normalized.get("request_id", "").strip() or str(uuid.uuid4())
-        now = utc_now()
-        created = []
-
         with self.lock:
-            req = self.requests.get(request_id)
-            if not req:
-                req = {
-                    "request_id": request_id,
-                    "schema_version": normalized.get("schema_version", schema.JOB_SCHEMA_VERSION),
-                    "created_at": now,
-                    "updated_at": now,
-                    "job_ids": [],
-                }
-                self.requests[request_id] = req
-
-            for scene_job in scene_jobs:
-                job_id = str(uuid.uuid4())
-                job = {
-                    "job_id": job_id,
-                    "request_id": request_id,
-                    "schema_version": scene_job.get("schema_version", schema.JOB_SCHEMA_VERSION),
-                    "status": "queued",
-                    "scene_job": scene_job,
-                    "created_at": now,
-                    "updated_at": now,
-                    "started_at": 0,
-                    "finished_at": 0,
-                    "claimed_by": None,
-                    "attempts": 0,
-                    "last_error": "",
-                    "result": {},
-                }
-                self.jobs[job_id] = job
-                self.queue.append(job_id)
-                req["job_ids"].append(job_id)
-                created.append(job)
-
-            req["updated_at"] = now
+            created = self._enqueue_scene_jobs_locked(request_id, scene_jobs, normalized.get("schema_version"))
             self.save()
         return request_id, created
+
+    def submit_batch(self, raw_requests, request_id=None, meta=None):
+        """Queue several job requests as ONE submission (one request id) with a
+        single state save. Used by the recipe submitter, whose jobs span several
+        scenes and split chunks. ``meta`` (e.g. recipe + label) is stored on the
+        request record for reference."""
+        request_id = str(request_id or "").strip() or str(uuid.uuid4())
+        batches = []
+        for raw in raw_requests or []:
+            normalized = schema.normalize_job_request(raw)
+            scene_jobs = schema.build_scene_jobs(normalized, already_normalized=True)
+            if not scene_jobs:
+                raise ValueError("A request in the batch contains no scene jobs.")
+            batches.append((normalized, scene_jobs))
+        if not batches:
+            raise ValueError("Batch contains no requests.")
+        with self.lock:
+            created = []
+            for normalized, scene_jobs in batches:
+                created.extend(self._enqueue_scene_jobs_locked(
+                    request_id, scene_jobs, normalized.get("schema_version")))
+            if isinstance(meta, dict):
+                self.requests[request_id].update(
+                    {k: v for k, v in meta.items() if k not in ("request_id", "job_ids")})
+            self.save()
+        return request_id, created
+
+    def _enqueue_scene_jobs_locked(self, request_id, scene_jobs, schema_version=None):
+        """Create queued jobs for ``scene_jobs`` under ``request_id``. Caller holds
+        the lock and saves."""
+        now = utc_now()
+        created = []
+        req = self.requests.get(request_id)
+        if not req:
+            req = {
+                "request_id": request_id,
+                "schema_version": schema_version or schema.JOB_SCHEMA_VERSION,
+                "created_at": now,
+                "updated_at": now,
+                "job_ids": [],
+            }
+            self.requests[request_id] = req
+
+        for scene_job in scene_jobs:
+            job_id = str(uuid.uuid4())
+            job = {
+                "job_id": job_id,
+                "request_id": request_id,
+                "schema_version": scene_job.get("schema_version", schema.JOB_SCHEMA_VERSION),
+                "status": "queued",
+                "scene_job": scene_job,
+                "created_at": now,
+                "updated_at": now,
+                "started_at": 0,
+                "finished_at": 0,
+                "claimed_by": None,
+                "attempts": 0,
+                "last_error": "",
+                "result": {},
+            }
+            self.jobs[job_id] = job
+            self.queue.append(job_id)
+            req["job_ids"].append(job_id)
+            created.append(job)
+
+        req["updated_at"] = now
+        return created
 
     def register_worker(self, worker_info):
         now = utc_now()
@@ -838,10 +873,11 @@ class DiscoveryResponder(threading.Thread):
 
 
 class JobServerHTTP(ThreadingHTTPServer):
-    def __init__(self, server_address, handler_cls, state, local_only):
+    def __init__(self, server_address, handler_cls, state, local_only, submitter=None):
         super().__init__(server_address, handler_cls)
         self.state = state
         self.local_only = local_only
+        self.submitter = submitter
 
 
 def build_dashboard_payload(server):
@@ -1076,6 +1112,17 @@ class RequestHandler(BaseHTTPRequestHandler):
         except Exception:
             raise ValueError("Invalid JSON body")
 
+    def _submitter_api(self, method, path, payload):
+        api = self.server.submitter
+        if api is None:
+            self._json(HTTPStatus.NOT_FOUND, {"error": "submitter_disabled"})
+            return
+        try:
+            code, body = api.handle(method, path, payload)
+        except Exception as exc:  # never let a recipe take the handler down
+            code, body = 500, {"error": "internal_error", "message": f"{type(exc).__name__}: {exc}"}
+        self._json(code, body)
+
     def do_GET(self):
         if self._deny_if_not_local():
             return
@@ -1092,6 +1139,19 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         if path == "/static/server_dashboard.js":
             self._js(HTTPStatus.OK, read_js())
+            return
+
+        if path in ("/submitter", "/submitter/"):
+            self._html(HTTPStatus.OK, render_submitter(self.server.server_address))
+            return
+        if path == "/static/submitter.css":
+            self._css(HTTPStatus.OK, read_submitter_css())
+            return
+        if path == "/static/submitter.js":
+            self._js(HTTPStatus.OK, read_submitter_js())
+            return
+        if path.startswith("/submitter/api/"):
+            self._submitter_api("GET", path, None)
             return
 
         if path == "/health":
@@ -1241,6 +1301,12 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.OK, job)
             return
 
+        if path.startswith("/submitter/api/"):
+            if self._deny_if_missing_csrf():
+                return
+            self._submitter_api("POST", path, payload)
+            return
+
         if path.startswith("/admin/"):
             if self._deny_if_missing_csrf():
                 return
@@ -1365,16 +1431,30 @@ class RequestHandler(BaseHTTPRequestHandler):
         self._json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
 
 
+def default_recipes_dir(state_file):
+    """Recipes live next to the state file unless --recipes-dir says otherwise."""
+    return os.path.join(os.path.dirname(os.path.abspath(state_file)), "recipes")
+
+
 class ServerRuntime:
-    def __init__(self, host, port, state_file, local_only=True, enable_discovery=True):
+    def __init__(self, host, port, state_file, local_only=True, enable_discovery=True, recipes_dir=None):
         self.host = host
         self.port = port
         self.state_file = state_file
         self.local_only = local_only
         self.enable_discovery = enable_discovery
+        self.recipes_dir = recipes_dir or default_recipes_dir(state_file)
 
         self.state = JobServerState(state_file=state_file)
-        self.httpd = JobServerHTTP((host, port), RequestHandler, state=self.state, local_only=local_only)
+        store = RecipeStore(self.recipes_dir)
+        try:
+            store.ensure_seeded()
+        except OSError as exc:
+            print(f"Recipes folder not writable ({self.recipes_dir}): {exc}")
+        self.httpd = JobServerHTTP(
+            (host, port), RequestHandler, state=self.state, local_only=local_only,
+            submitter=SubmitterAPI(store, self.state),
+        )
         self.stop_event = threading.Event()
         self.discovery = None
         self._thread = None
@@ -1454,18 +1534,20 @@ class ServerRuntime:
             self.stop()
 
 
-def run_server(host, port, state_file, local_only=True, enable_discovery=True):
+def run_server(host, port, state_file, local_only=True, enable_discovery=True, recipes_dir=None):
     runtime = ServerRuntime(
         host=host,
         port=port,
         state_file=state_file,
         local_only=local_only,
         enable_discovery=enable_discovery,
+        recipes_dir=recipes_dir,
     )
     runtime.start()
     print(f"VB Batch Server listening on http://{host}:{port}")
     print(f"Local network only: {local_only}")
     print(f"State file: {os.path.abspath(state_file)}")
+    print(f"Submitter recipes: {runtime.recipes_dir}")
     if enable_discovery:
         print(f"Discovery UDP port: {port + 1}")
     runtime.wait_forever()
@@ -1554,7 +1636,7 @@ class _DashboardNativeApi:
         return picked[0] if picked else ""
 
 
-def run_server_window(host, port, state_file, local_only=True, enable_discovery=True):
+def run_server_window(host, port, state_file, local_only=True, enable_discovery=True, recipes_dir=None):
     """Run the server headless and present the web dashboard in a native window.
 
     The desktop "UI" is just the same browser dashboard wrapped in a pywebview
@@ -1566,7 +1648,7 @@ def run_server_window(host, port, state_file, local_only=True, enable_discovery=
     except ImportError:
         print("pywebview is not installed; running headless instead.")
         print("Install it with:  pip install pywebview")
-        run_server(host, port, state_file, local_only, enable_discovery)
+        run_server(host, port, state_file, local_only, enable_discovery, recipes_dir)
         return
 
     runtime = ServerRuntime(
@@ -1575,6 +1657,7 @@ def run_server_window(host, port, state_file, local_only=True, enable_discovery=
         state_file=state_file,
         local_only=local_only,
         enable_discovery=enable_discovery,
+        recipes_dir=recipes_dir,
     )
     runtime.start()
     # The browser can't reach a 0.0.0.0/:: bind directly; point the window at
@@ -1583,7 +1666,14 @@ def run_server_window(host, port, state_file, local_only=True, enable_discovery=
     url = f"http://{ui_host}:{port}/"
     print(f"VB Batch Server listening on http://{host}:{port}")
     print(f"State file: {os.path.abspath(state_file)}")
+    print(f"Submitter recipes: {runtime.recipes_dir}")
     print(f"Opening dashboard window at {url}")
+    # The submitter's "Download payloads" button saves a JSON file; WebView2
+    # drops downloads unless pywebview is told to allow them.
+    try:
+        webview.settings["ALLOW_DOWNLOADS"] = True
+    except Exception:
+        pass
     # Not private mode: the page keeps its localStorage (remembered New Job
     # settings, worker colours) across restarts, stored next to the state file.
     storage_dir = os.path.join(os.path.dirname(os.path.abspath(state_file)), "webview")
@@ -1627,6 +1717,12 @@ def parse_args():
         action="store_true",
         help="Open the web dashboard in a native window (pywebview) alongside the server.",
     )
+    parser.add_argument(
+        "--recipes-dir",
+        default=None,
+        help="Folder holding the submitter recipes (.py) and their saved state "
+             "(default: a 'recipes' folder next to the state file). Point it at the NAS to share.",
+    )
     return parser.parse_args()
 
 
@@ -1639,6 +1735,7 @@ def main():
             state_file=args.state_file,
             local_only=(not args.allow_non_local),
             enable_discovery=(not args.no_discovery),
+            recipes_dir=args.recipes_dir,
         )
         return
 
@@ -1648,6 +1745,7 @@ def main():
         state_file=args.state_file,
         local_only=(not args.allow_non_local),
         enable_discovery=(not args.no_discovery),
+        recipes_dir=args.recipes_dir,
     )
 
 

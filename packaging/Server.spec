@@ -15,6 +15,13 @@ a = Analysis(
         (str(PROJECT_ROOT / 'NetworkRender' / 'server' / 'server_dashboard.html'), 'NetworkRender\\server'),
         (str(PROJECT_ROOT / 'NetworkRender' / 'server' / 'server_dashboard.css'),  'NetworkRender\\server'),
         (str(PROJECT_ROOT / 'NetworkRender' / 'server' / 'server_dashboard.js'),   'NetworkRender\\server'),
+        # Recipe submitter page (/submitter) plus the example recipes seeded into
+        # a fresh recipes folder. submitter.py / recipe_api.py are imported by
+        # server.py, so PyInstaller bundles them as code.
+        (str(PROJECT_ROOT / 'NetworkRender' / 'server' / 'submitter.html'), 'NetworkRender\\server'),
+        (str(PROJECT_ROOT / 'NetworkRender' / 'server' / 'submitter.css'),  'NetworkRender\\server'),
+        (str(PROJECT_ROOT / 'NetworkRender' / 'server' / 'submitter.js'),   'NetworkRender\\server'),
+        (str(PROJECT_ROOT / 'NetworkRender' / 'server' / 'submitter_recipes'), 'NetworkRender\\server\\submitter_recipes'),
         (str(PROJECT_ROOT / 'NetworkRender' / 'shared'), 'NetworkRender\\shared'),
     ],
     # The desktop dashboard is the web UI wrapped in pywebview (Edge WebView2 on

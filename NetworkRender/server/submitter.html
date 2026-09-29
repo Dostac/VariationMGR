@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>__TITLE__</title>
+  <link rel="stylesheet" href="/static/server_dashboard.css">
+  <link rel="stylesheet" href="/static/submitter.css">
+</head>
+<body>
+  <div class="wrap wrap-wide">
+
+    <!-- ── Top bar: back to the queue, recipe picker, recipe actions ─────── -->
+    <header class="topbar">
+      <a class="btn" href="/" title="Back to the render queue">&larr; Queue</a>
+      <h1>Submitter</h1>
+      <select id="recipe-select" class="select recipe-select" aria-label="Recipe"></select>
+      <button class="btn" id="btn-edit-recipe" title="Edit this recipe's Python source">Edit recipe</button>
+      <button class="btn" id="btn-new-recipe" title="Create a recipe from the template">+ New recipe</button>
+      <div class="pill-row">
+        <span class="pill" id="pill-folder" title="Recipes folder on the server">Recipes —</span>
+        <span class="pill" id="pill-saved">—</span>
+      </div>
+    </header>
+
+    <div class="recipe-head">
+      <p class="recipe-desc" id="recipe-desc"></p>
+      <div class="sub-banner sub-banner-error" id="recipe-error" hidden></div>
+    </div>
+
+    <div class="sub-cols">
+      <!-- ── Main column: input grid + preview ─────────────────────────── -->
+      <div class="sub-main">
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Input rows <span class="count-badge" id="rows-count">0</span></h2>
+            <div class="panel-actions">
+              <button class="btn" id="btn-load-csv" title="Load a client CSV (comma, semicolon or tab separated)">Load CSV…</button>
+              <input type="file" id="csv-file" accept=".csv,.tsv,.txt" hidden>
+              <button class="btn" id="btn-scan" hidden>Scan folder</button>
+              <button class="btn" id="btn-add-row">+ Row</button>
+              <span class="sep"></span>
+              <button class="btn" id="btn-tick-all">Tick all</button>
+              <button class="btn" id="btn-tick-none">Untick all</button>
+              <button class="btn" id="btn-bulk" title="Set or randomize a column on the ticked rows">Bulk edit…</button>
+              <button class="btn btn-danger" id="btn-delete-ticked">Delete ticked</button>
+            </div>
+          </div>
+          <div class="input-source" id="input-source"></div>
+          <div class="sub-banner sub-banner-warn" id="input-warnings" hidden></div>
+          <div class="grid-wrap" id="grid-wrap">
+            <table class="t-grid" id="grid">
+              <thead id="grid-head"></thead>
+              <tbody id="grid-body"></tbody>
+            </table>
+          </div>
+          <div class="foot" id="grid-foot">Only ticked rows are rendered.</div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Preview</h2>
+            <span class="preview-status" id="preview-status">—</span>
+            <div class="panel-actions">
+              <button class="btn" id="btn-download" title="Save the job payloads as JSON">Download payloads</button>
+              <button class="btn btn-success" id="btn-submit" disabled>Submit</button>
+            </div>
+          </div>
+          <div class="sub-banner sub-banner-ok" id="submit-result" hidden></div>
+          <div class="sub-banner sub-banner-error" id="preview-errors" hidden></div>
+          <div class="sub-banner sub-banner-warn" id="preview-warnings" hidden></div>
+          <div class="table-scroll">
+          <table class="t-preview">
+            <thead>
+              <tr>
+                <th>Scene</th>
+                <th>File</th>
+                <th class="num">Rows</th>
+                <th class="num">Jobs</th>
+                <th>Split (table rows)</th>
+                <th>Render</th>
+              </tr>
+            </thead>
+            <tbody id="preview-body">
+              <tr><td colspan="6" class="empty">Load rows to see the jobs this recipe creates.</td></tr>
+            </tbody>
+          </table>
+          </div>
+          <details class="recipe-log" id="preview-log" hidden>
+            <summary>Recipe log</summary>
+            <pre id="preview-log-text"></pre>
+          </details>
+        </section>
+      </div>
+
+      <!-- ── Side column: options, settings, history ───────────────────── -->
+      <aside class="sub-side">
+        <section class="panel" id="panel-options" hidden>
+          <h2>Recipe options</h2>
+          <div id="options-form"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Output &amp; render</h2>
+            <button class="btn btn-link" id="btn-reset-settings" title="Reset these fields to the recipe's DEFAULTS">Reset</button>
+          </div>
+          <div class="settings-form">
+            <div class="form-block">
+              <label class="field-label" for="s-folder">Output folder</label>
+              <div class="input-with-btn">
+                <input type="text" id="s-folder" class="input" spellcheck="false" placeholder="\\vb_nas\nas\…\Renders">
+                <button type="button" class="btn native-only" id="s-folder-browse" hidden>Browse…</button>
+              </div>
+            </div>
+            <div class="form-row">
+              <label class="field-label" for="s-version">Version</label>
+              <select id="s-version" class="select"></select>
+            </div>
+            <div class="form-row">
+              <label class="field-label" for="s-format">Format</label>
+              <select id="s-format" class="select">
+                <option value="jpg">jpg</option>
+                <option value="png">png</option>
+                <option value="tif">tif</option>
+                <option value="exr">exr</option>
+              </select>
+            </div>
+            <div class="form-row">
+              <label class="field-label" for="s-depth">Bit depth</label>
+              <select id="s-depth" class="select"></select>
+            </div>
+            <div class="form-checks">
+              <label class="toggle" id="s-alpha-row"><input type="checkbox" id="s-alpha"> Save alpha</label>
+              <label class="toggle" id="s-re-row"><input type="checkbox" id="s-re"> Save render elements</label>
+            </div>
+            <div class="form-divider"></div>
+            <label class="toggle"><input type="checkbox" id="s-override"> Override scene render settings</label>
+            <div class="form-indent" id="s-override-block" hidden>
+              <div class="form-row">
+                <label class="field-label" for="s-resolution">Longest side</label>
+                <div class="input-suffix"><input type="number" id="s-resolution" class="input" min="100" max="30000" step="1"><span class="suffix">px</span></div>
+              </div>
+              <div class="form-row">
+                <label class="field-label" for="s-pass">Pass limit</label>
+                <input type="number" id="s-pass" class="input" min="0" max="10000" step="1">
+              </div>
+              <div class="form-row">
+                <label class="field-label" for="s-noise">Noise limit</label>
+                <div class="input-suffix"><input type="number" id="s-noise" class="input" min="0" max="100" step="0.5"><span class="suffix">%</span></div>
+              </div>
+            </div>
+            <div class="form-divider"></div>
+            <div class="form-row">
+              <label class="field-label" for="s-chunk">Rows per job</label>
+              <input type="number" id="s-chunk" class="input" min="0" max="100000" step="1">
+            </div>
+            <div class="field-hint">Each scene's rows are pooled into one table, then split into jobs of this many rows so workers share the load. 0 = one job per scene.</div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <h2>Recent submissions</h2>
+          <div id="history" class="history"><div class="history-empty">None yet.</div></div>
+        </section>
+      </aside>
+    </div>
+
+    <!-- ── Recipe editor ──────────────────────────────────────────────── -->
+    <div id="editor-overlay" class="modal-overlay" hidden>
+      <div class="modal modal-editor" role="dialog" aria-modal="true" aria-labelledby="editor-title">
+        <div class="modal-head">
+          <h3 id="editor-title">Edit recipe</h3>
+          <span class="editor-path" id="editor-path"></span>
+          <button class="modal-close" id="editor-close" aria-label="Close">&times;</button>
+        </div>
+        <div class="modal-warn" id="editor-error" hidden></div>
+        <textarea id="editor-text" class="editor-text" spellcheck="false" wrap="off"></textarea>
+        <div class="modal-foot">
+          <span class="editor-hint">Ctrl+S saves. Tab indents 4 spaces. Contract: docs/SUBMITTER_RECIPES.md</span>
+          <button class="btn" id="editor-reload" title="Discard edits and reload the file from disk">Reload</button>
+          <button class="btn" id="editor-cancel">Close</button>
+          <button class="btn btn-primary" id="editor-save">Save</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Bulk edit ticked rows ──────────────────────────────────────── -->
+    <div id="bulk-overlay" class="modal-overlay" hidden>
+      <div class="modal modal-small" role="dialog" aria-modal="true" aria-labelledby="bulk-title">
+        <div class="modal-head">
+          <h3 id="bulk-title">Bulk edit ticked rows</h3>
+          <button class="modal-close" id="bulk-close" aria-label="Close">&times;</button>
+        </div>
+        <div class="modal-body">
+          <div class="form-row">
+            <label class="field-label" for="bulk-column">Column</label>
+            <select id="bulk-column" class="select"></select>
+          </div>
+          <div class="form-row">
+            <label class="field-label" for="bulk-action">Action</label>
+            <select id="bulk-action" class="select">
+              <option value="set">Set to value</option>
+              <option value="random">Randomize from choices</option>
+            </select>
+          </div>
+          <div class="form-row" id="bulk-value-row">
+            <label class="field-label" for="bulk-value-text">Value</label>
+            <div>
+              <input type="text" id="bulk-value-text" class="input">
+              <select id="bulk-value-select" class="select" hidden></select>
+            </div>
+          </div>
+          <div class="field-hint" id="bulk-hint"></div>
+        </div>
+        <div class="modal-foot">
+          <button class="btn" id="bulk-cancel">Cancel</button>
+          <button class="btn btn-primary" id="bulk-apply">Apply</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  </div>
+
+  <script>const CFG = __CFG__;</script>
+  <script src="/static/submitter.js"></script>
+</body>
+</html>

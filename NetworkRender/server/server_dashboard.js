@@ -271,21 +271,35 @@ function renderStats(data) {
   const failed  = by.failed || 0;
   const pct     = total ? Math.round((done * 100) / total) : 0;
 
-  // Top bar
-  $("pill-workers").textContent = `Workers ${s.workers_total || 0}`;
+  // Top bar: the badge says whether the queue is running, next to the big
+  // Pause/Resume button.
   const paused = !!data.queue_paused;
-  $("pill-queue").innerHTML = `<span class="status-indicator ${paused?"paused":"processing"}">${paused?"Paused":"Active"}</span>`;
-  $("pill-updated").textContent = fmtTime(data.now_ts);
-  $("btn-pause").textContent = paused ? "▶ Resume" : "⏸ Pause";
+  const badge = $("hero-status");
+  badge.textContent = paused ? "Paused" : "Active";
+  badge.classList.toggle("paused", paused);
+  renderPauseButton(paused);
 
   const avgTxt = data.avg_duration_seconds ? fmtDuration(data.avg_duration_seconds) : "—";
+
+  // ETA, shown in the progress panel.
+  const etaVal = $("eta-value");
+  const etaLbl = $("eta-label");
+  const pending = queued + running;
+  let etaText = "—";
+  let etaSub = "to clear the queue";
   if (paused) {
-    $("pill-eta").textContent = "ETA paused";
+    etaText = "Paused";
+    etaSub = pending ? "resume to continue" : "queue is paused";
   } else if (data.eta_seconds && data.eta_seconds > 0) {
-    $("pill-eta").textContent = `ETA ${fmtDuration(data.eta_seconds)}`;
+    etaText = fmtDuration(data.eta_seconds);
+  } else if (!pending) {
+    etaSub = "nothing queued";
   } else {
-    $("pill-eta").textContent = "ETA —";
+    etaSub = "estimating after the first job";
   }
+  etaVal.textContent = etaText;
+  etaVal.classList.toggle("paused", paused);
+  etaLbl.textContent = etaSub;
 
   // Progress left column
   $("progress-pct").textContent = pct + "%";
@@ -299,9 +313,8 @@ function renderStats(data) {
   $("si-queued").textContent  = queued;
   $("si-failed").textContent  = failed;
 
-  const etaPart = (data.eta_seconds && data.eta_seconds > 0) ? `eta ${fmtDuration(data.eta_seconds)}` : "eta —";
   const frozenPart = data.frozen_count > 0 ? ` · ${data.frozen_count} frozen` : "";
-  $("stats-meta").textContent = `avg ${avgTxt} · ${etaPart}${frozenPart}`;
+  $("stats-meta").textContent = `avg ${avgTxt} per job${frozenPart}`;
 
   $("chk-auto-requeue").checked = !!data.auto_requeue_failed;
 }
@@ -749,7 +762,27 @@ function renderSwimlane(el, filteredJobs) {
 
 // ── Render all performance ───────────────────────────────────────────────────
 
+// Performance panel collapse state, remembered per browser. While collapsed
+// the charts are not rendered at all (they rebuild on every poll otherwise).
+const PERF_COLLAPSED_KEY = "vb_perf_collapsed";
+let perfCollapsed = (() => {
+  try { return localStorage.getItem(PERF_COLLAPSED_KEY) === "1"; } catch { return false; }
+})();
+
+function applyPerfCollapsed() {
+  $("perf-panel").classList.toggle("collapsed", perfCollapsed);
+  $("perf-toggle").setAttribute("aria-expanded", String(!perfCollapsed));
+}
+
+function togglePerfPanel() {
+  perfCollapsed = !perfCollapsed;
+  try { localStorage.setItem(PERF_COLLAPSED_KEY, perfCollapsed ? "1" : "0"); } catch {}
+  applyPerfCollapsed();
+  if (!perfCollapsed && lastSnapshot) renderPerformance(lastSnapshot);
+}
+
 function renderPerformance(data) {
+  if (perfCollapsed) return;
   renderWorkerChips(data);
   const filtered = filterJobsForPerf(data);
   renderStatStrip(filtered);
@@ -831,6 +864,24 @@ async function actClearAll() {
     selectedJobIds.clear();
     await loadData();
   } catch (e) { toast("Clear all failed: " + e.message, true); }
+}
+
+// Big square queue toggle: icon above the word. Paused turns it green, so
+// "Resume" reads as the obvious next action.
+const PAUSE_SVG = `<svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><rect x="6" y="4.5" width="4" height="15" rx="1"/><rect x="14" y="4.5" width="4" height="15" rx="1"/></svg>`;
+const PLAY_SVG  = `<svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M8 4.8v14.4a1 1 0 0 0 1.5.86l11.2-7.2a1 1 0 0 0 0-1.72L9.5 3.94A1 1 0 0 0 8 4.8z"/></svg>`;
+
+function renderPauseButton(paused) {
+  const btn = $("btn-pause");
+  if (btn.dataset.paused === String(paused)) return;   // avoid rebuilding every poll
+  btn.dataset.paused = String(paused);
+  btn.classList.toggle("is-paused", paused);
+  btn.querySelector(".pause-icon").innerHTML = paused ? PLAY_SVG : PAUSE_SVG;
+  btn.querySelector(".pause-label").textContent = paused ? "Resume" : "Pause";
+  btn.title = paused
+    ? "Resume the queue: workers start claiming jobs again"
+    : "Pause the queue: workers finish their current job and claim nothing new";
+  btn.setAttribute("aria-label", paused ? "Resume queue" : "Pause queue");
 }
 
 async function actTogglePause() {
@@ -1793,6 +1844,8 @@ function wire() {
   $("chk-auto-requeue").addEventListener("change", actToggleAutoRequeue);
   $("worker-chips").addEventListener("click", onWorkerChipClick);
   $("perf-status").addEventListener("change", onPerfFilterChange);
+  $("perf-toggle").addEventListener("click", togglePerfPanel);
+  applyPerfCollapsed();
   $("perf-window").addEventListener("change", onPerfFilterChange);
   $("job-tabs").addEventListener("click", onJobTabClick);
   // Context menu: act on item click; dismiss on any click-away, scroll,

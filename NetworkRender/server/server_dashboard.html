@@ -14,12 +14,12 @@
       <h1>Render Server</h1>
       <span class="hero-badge" id="hero-status">Active</span>
       <div class="pill-row">
-        <div class="pill" id="pill-http">HTTP __HTTP_ADDR__</div>
-        <div class="pill" id="pill-workers">Workers —</div>
-        <div class="pill" id="pill-queue"><span class="status-indicator processing">…</span></div>
-        <div class="pill" id="pill-eta" title="Estimated time to clear the queue">ETA —</div>
-        <div class="pill" id="pill-updated">—</div>
-        <button class="btn btn-tonal" id="btn-pause" style="margin-left:4px">⏸ Pause</button>
+        <!-- Square and larger than the pills on purpose: pausing the whole
+             queue is the most consequential control on the page. The label
+             is rendered by renderPauseButton() in server_dashboard.js. -->
+        <button class="btn btn-tonal btn-pause-big" id="btn-pause" title="Pause the queue: workers finish their current job and claim nothing new">
+          <span class="pause-icon" aria-hidden="true"></span><span class="pause-label">Pause</span>
+        </button>
       </div>
     </header>
 
@@ -32,8 +32,18 @@
           <div class="progress-label">Total Progress</div>
           <div class="progress-pct-val" id="progress-pct">—%</div>
         </div>
-        <div class="progress-big" id="progress-done">—</div>
-        <div class="progress-detail" id="progress-text">of — jobs complete</div>
+        <!-- Done count (left) and time to clear the queue (right). The ETA
+             used to be a top-bar pill; it belongs with the progress. -->
+        <div class="progress-row">
+          <div>
+            <div class="progress-big" id="progress-done">—</div>
+            <div class="progress-detail" id="progress-text">of — jobs complete</div>
+          </div>
+          <div class="progress-eta" title="Estimated time until every queued job is done (frozen jobs excluded)">
+            <div class="eta-value" id="eta-value">—</div>
+            <div class="eta-label" id="eta-label">to clear the queue</div>
+          </div>
+        </div>
         <div class="progress"><div class="bar" id="progress-bar" style="width:0%"></div></div>
 
         <div class="stats-row" id="stats-row">
@@ -41,7 +51,7 @@
           <div class="stat-inline"><span class="si-dot" style="background:var(--blue)"></span><span class="si-label">Running</span><span class="si-value blue" id="si-running">—</span></div>
           <div class="stat-inline"><span class="si-dot" style="background:var(--text-dim)"></span><span class="si-label">Queued</span><span class="si-value" id="si-queued">—</span></div>
           <div class="stat-inline"><span class="si-dot" style="background:var(--red)"></span><span class="si-label">Failed</span><span class="si-value red" id="si-failed">—</span></div>
-          <div class="stats-meta" id="stats-meta">avg — · eta —</div>
+          <div class="stats-meta" id="stats-meta">avg — per job</div>
         </div>
       </div>
 
@@ -62,7 +72,10 @@
     <!-- ── Performance ───────────────────────────────────────────────── -->
     <section class="panel" id="perf-panel">
       <div class="panel-head">
-        <h2>Performance</h2>
+        <button type="button" class="panel-toggle" id="perf-toggle" aria-expanded="true" aria-controls="perf-body"
+                title="Collapse or expand the performance charts">
+          <span class="chev" aria-hidden="true"></span><h2>Performance</h2>
+        </button>
         <div class="panel-actions perf-filters">
           <div class="filter-group" id="worker-chips">
             <span class="filter-label">Workers</span>
@@ -86,6 +99,7 @@
         </div>
       </div>
 
+      <div id="perf-body">
       <div class="stat-strip">
         <div class="stat">
           <div class="s-label">Count</div>
@@ -131,6 +145,7 @@
           <div class="chart-body chart-swimlane" id="chart-swimlane"></div>
         </div>
       </div>
+      </div>
     </section>
 
     <!-- ── Jobs ──────────────────────────────────────────────────────── -->
@@ -164,10 +179,15 @@
         <button class="btn" id="btn-remove-done">Remove Done</button>
         <button class="btn" id="btn-remove-failed">Remove Failed</button>
         <button class="btn btn-danger" id="btn-clear-all">Clear All</button>
-        <button class="btn btn-success" id="btn-new-job" style="margin-left:auto"
+        <a class="btn" href="/submitter" style="margin-left:auto"
+           title="Turn a client CSV into pooled, split jobs with a saved recipe">Submitter</a>
+        <button class="btn btn-success" id="btn-new-job"
                 title="Queue new scenes straight from the dashboard">+ New Job</button>
       </div>
 
+      <!-- Safety net: if the columns still can't fit (very narrow window), the
+           table scrolls inside the panel instead of spilling out of it. -->
+      <div class="jobs-table-wrap">
       <table class="t-jobs">
         <thead>
           <tr>
@@ -187,6 +207,7 @@
           <tr><td colspan="10" class="empty">Loading…</td></tr>
         </tbody>
       </table>
+      </div>
       <div class="foot" id="jobs-foot">—</div>
     </section>
 

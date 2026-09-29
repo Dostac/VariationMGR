@@ -29,5 +29,23 @@ def read_js():
     return (_DIR / "server_dashboard.js").read_text(encoding="utf-8")
 
 
+def render_submitter(server_address):
+    """The recipe submitter page (/submitter). Shares the dashboard stylesheet."""
+    host, port = server_address[0], server_address[1]
+    template = (_DIR / "submitter.html").read_text(encoding="utf-8")
+    return (template
+        .replace("__TITLE__", _esc(f"Submitter — {host}:{port}"))
+        .replace("__CFG__",   json.dumps(CLIENT_CONFIG))
+    )
+
+
+def read_submitter_css():
+    return (_DIR / "submitter.css").read_text(encoding="utf-8")
+
+
+def read_submitter_js():
+    return (_DIR / "submitter.js").read_text(encoding="utf-8")
+
+
 def _esc(value):
     return _html.escape(str(value or ""))
