@@ -4,36 +4,41 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>__TITLE__</title>
+  <!-- Rethink Sans (the Unlit typeface). Loaded without blocking render, so an
+       offline machine just falls back to the system font. -->
+  <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Rethink+Sans:wght@400;500;600;700&display=swap" onload="this.rel='stylesheet'">
   <link rel="stylesheet" href="/static/server_dashboard.css">
 </head>
-<body>
+<body class="dash">
   <div class="wrap">
 
     <!-- ── Top bar ────────────────────────────────────────────────────── -->
     <header class="topbar">
-      <h1>Render Server</h1>
-      <span class="hero-badge" id="hero-status">Active</span>
-      <div class="pill-row">
-        <!-- Square and larger than the pills on purpose: pausing the whole
-             queue is the most consequential control on the page. The label
-             is rendered by renderPauseButton() in server_dashboard.js. -->
-        <button class="btn btn-tonal btn-pause-big" id="btn-pause" title="Pause the queue: workers finish their current job and claim nothing new">
-          <span class="pause-icon" aria-hidden="true"></span><span class="pause-label">Pause</span>
-        </button>
+      <div class="topbar-title">
+        <h1>Render Server</h1>
+        <span class="hero-badge" id="hero-status">Active</span>
       </div>
+      <!-- Notched button, like the "Gratis demo" button on unlit.studio: one
+           SVG path (icon circle, pinched notch, pill body) that morphs into a
+           plain pill on hover. The path is sized by layoutNotchedButtons().
+           Pausing the whole queue is the most consequential control
+           on the page, so it gets the big one. The icon, label and colour are
+           set by renderPauseButton() in server_dashboard.js. -->
+      <button class="nbtn" id="btn-pause" title="Pause the queue: workers finish their current job and claim nothing new">
+        <svg class="nbtn-shape" aria-hidden="true"><path/></svg><span class="nbtn-icon pause-icon" aria-hidden="true"></span><span class="nbtn-label pause-label">Pause</span>
+      </button>
     </header>
 
-    <!-- ── Two-column: Progress/Stats (left) + Workers (right) ────────── -->
+    <!-- ── Two-column: Progress (left) + Workers (right) ──────────────── -->
     <div class="main-cols">
 
-      <!-- LEFT: progress + stat row -->
-      <div class="panel">
+      <!-- LEFT: progress -->
+      <section class="panel panel-progress">
         <div class="progress-head">
-          <div class="progress-label">Total Progress</div>
+          <div class="progress-label">Total progress</div>
           <div class="progress-pct-val" id="progress-pct">—%</div>
         </div>
-        <!-- Done count (left) and time to clear the queue (right). The ETA
-             used to be a top-bar pill; it belongs with the progress. -->
+        <!-- Done count (left) and time to clear the queue (right). -->
         <div class="progress-row">
           <div>
             <div class="progress-big" id="progress-done">—</div>
@@ -44,28 +49,33 @@
             <div class="eta-label" id="eta-label">to clear the queue</div>
           </div>
         </div>
-        <div class="progress"><div class="bar" id="progress-bar" style="width:0%"></div></div>
+        <!-- Stacked bar: done (white), running (yellow), failed (black). -->
+        <div class="progress">
+          <div class="bar bar-done" id="bar-done"></div>
+          <div class="bar bar-running" id="bar-running"></div>
+          <div class="bar bar-failed" id="bar-failed"></div>
+        </div>
 
         <div class="stats-row" id="stats-row">
-          <div class="stat-inline"><span class="si-dot" style="background:var(--green)"></span><span class="si-label">Done</span><span class="si-value green" id="si-done">—</span></div>
-          <div class="stat-inline"><span class="si-dot" style="background:var(--blue)"></span><span class="si-label">Running</span><span class="si-value blue" id="si-running">—</span></div>
-          <div class="stat-inline"><span class="si-dot" style="background:var(--text-dim)"></span><span class="si-label">Queued</span><span class="si-value" id="si-queued">—</span></div>
-          <div class="stat-inline"><span class="si-dot" style="background:var(--red)"></span><span class="si-label">Failed</span><span class="si-value red" id="si-failed">—</span></div>
-          <div class="stats-meta" id="stats-meta">avg — per job</div>
+          <span class="stat-inline"><span class="si-dot" style="background:#ffffff"></span>Done<strong id="si-done">—</strong></span>
+          <span class="stat-inline"><span class="si-dot" style="background:var(--yellow)"></span>Running<strong id="si-running">—</strong></span>
+          <span class="stat-inline"><span class="si-dot" style="background:rgba(255,255,255,.4)"></span>Queued<strong id="si-queued">—</strong></span>
+          <span class="stat-inline"><span class="si-dot" style="background:var(--ink)"></span>Failed<strong id="si-failed">—</strong></span>
+          <span class="stats-meta" id="stats-meta">avg — per job</span>
         </div>
-      </div>
+      </section>
 
       <!-- RIGHT: workers -->
-      <div class="panel panel-workers">
+      <section class="panel panel-workers">
         <div class="workers-header">
           <h2>Workers</h2>
           <span class="workers-status" id="workers-status">—</span>
         </div>
-        <div class="worker-note">→ each worker has a color, reused everywhere it appears below</div>
+        <p class="worker-note">Each worker has a color, reused everywhere it appears below.</p>
         <div id="workers-list">
-          <div class="worker-row"><span class="worker-name" style="color:var(--text-muted)">Loading…</span></div>
+          <div class="worker-row"><span class="worker-item__meta">Loading…</span></div>
         </div>
-      </div>
+      </section>
 
     </div>
 
@@ -74,28 +84,29 @@
       <div class="panel-head">
         <button type="button" class="panel-toggle" id="perf-toggle" aria-expanded="true" aria-controls="perf-body"
                 title="Collapse or expand the performance charts">
-          <span class="chev" aria-hidden="true"></span><h2>Performance</h2>
+          <span class="chev" aria-hidden="true"><svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 13.17l4.95-4.95 1.41 1.41L12 16 5.64 9.64l1.41-1.41z"/></svg></span><h2>Performance</h2>
         </button>
         <div class="panel-actions perf-filters">
           <div class="filter-group" id="worker-chips">
             <span class="filter-label">Workers</span>
             <button class="chip-btn active" data-worker-all>All</button>
           </div>
-          <div class="filter-group">
-            <span class="filter-label">Status</span>
-            <select id="perf-status" class="select">
+          <span class="filter-sep" aria-hidden="true"></span>
+          <label class="select-wrap" title="Which finished jobs the stats include">
+            <select id="perf-status" class="select select-pill">
               <option value="done">Done only</option>
               <option value="done_failed">Done + Failed</option>
             </select>
-          </div>
-          <div class="filter-group">
-            <span class="filter-label">Window</span>
-            <select id="perf-window" class="select">
+            <svg class="select-chev" viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M12 13.17l4.95-4.95 1.41 1.41L12 16 5.64 9.64l1.41-1.41z"/></svg>
+          </label>
+          <label class="select-wrap" title="Time window">
+            <select id="perf-window" class="select select-pill">
               <option value="all">All time</option>
               <option value="24h">Last 24 h</option>
               <option value="1h">Last hour</option>
             </select>
-          </div>
+            <svg class="select-chev" viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M12 13.17l4.95-4.95 1.41 1.41L12 16 5.64 9.64l1.41-1.41z"/></svg>
+          </label>
         </div>
       </div>
 
@@ -130,19 +141,25 @@
 
       <div class="chart-grid">
         <div class="chart-card">
-          <div class="chart-title">Jobs by Worker</div>
-          <div class="chart-subtitle">Completed job count · who's pulling weight</div>
+          <div class="chart-head">
+            <h3 class="chart-title">Jobs by worker</h3>
+            <p class="chart-subtitle">Completed job count</p>
+          </div>
           <div class="chart-body" id="chart-pie"></div>
         </div>
         <div class="chart-card">
-          <div class="chart-title">Avg Duration by Worker</div>
-          <div class="chart-subtitle">Mean render time · lower = faster</div>
+          <div class="chart-head">
+            <h3 class="chart-title">Avg duration by worker</h3>
+            <p class="chart-subtitle">Mean render time. Shorter is faster.</p>
+          </div>
           <div class="chart-body" id="chart-bars"></div>
         </div>
         <div class="chart-card">
-          <div class="chart-title">Recent Activity · Timeline</div>
-          <div class="chart-subtitle">Each block = one render · width = duration · placed at start time</div>
-          <div class="chart-body chart-swimlane" id="chart-swimlane"></div>
+          <div class="chart-head">
+            <h3 class="chart-title">Recent activity</h3>
+            <p class="chart-subtitle">Each block is one render, placed at start time. Width is duration.</p>
+          </div>
+          <div class="chart-body" id="chart-swimlane"></div>
         </div>
       </div>
       </div>
@@ -150,39 +167,42 @@
 
     <!-- ── Jobs ──────────────────────────────────────────────────────── -->
     <section class="panel">
-      <!-- One-row header: title + total + tabs + auto-requeue toggle -->
+      <!-- Header: title + tabs, auto-requeue switch on the right -->
       <div class="jobs-head">
-        <h2>Jobs</h2>
-        <span class="jobs-total-badge" id="jobs-total-badge">—</span>
-        <div class="job-tabs" id="job-tabs">
-          <button class="job-tab active" data-tab="all">All <span class="tab-count" id="tab-cnt-all">0</span></button>
-          <button class="job-tab" data-tab="done">Done <span class="tab-count" id="tab-cnt-done">0</span></button>
-          <button class="job-tab" data-tab="running">Running <span class="tab-count" id="tab-cnt-running">0</span></button>
-          <button class="job-tab" data-tab="queued">Queued <span class="tab-count" id="tab-cnt-queued">0</span></button>
-          <button class="job-tab" data-tab="failed">Failed <span class="tab-count" id="tab-cnt-failed">0</span></button>
+        <div class="jobs-head-left">
+          <h2>Jobs</h2>
+          <div class="job-tabs" id="job-tabs">
+            <button class="job-tab active" data-tab="all">All <span class="tab-count" id="tab-cnt-all">0</span></button>
+            <button class="job-tab" data-tab="done">Done <span class="tab-count" id="tab-cnt-done">0</span></button>
+            <button class="job-tab" data-tab="running">Running <span class="tab-count" id="tab-cnt-running">0</span></button>
+            <button class="job-tab" data-tab="queued">Queued <span class="tab-count" id="tab-cnt-queued">0</span></button>
+            <button class="job-tab" data-tab="failed">Failed <span class="tab-count" id="tab-cnt-failed">0</span></button>
+          </div>
         </div>
-        <label class="toggle" style="margin-left:auto">
-          <input type="checkbox" id="chk-auto-requeue">
+        <label class="switch">
+          <input type="checkbox" id="chk-auto-requeue"><span class="switch-track" aria-hidden="true"></span>
           Auto-requeue failed
         </label>
       </div>
 
-      <!-- Action buttons row. Per-selection actions (Edit, Requeue, Freeze,
-           Remove…) live in the right-click context menu on job rows; only
-           queue-wide actions, which have no per-row home, stay as buttons.
-           "New Job" (submit straight from the dashboard) is docked to the
-           right edge, away from the destructive queue actions. -->
-      <div class="jobs-actions" style="margin-bottom:10px">
-        <span class="jobs-actions-hint" title="Right-click a job row for Edit, Requeue, Freeze and Remove">Right-click a row for actions ›</span>
-        <span class="sep"></span>
-        <button class="btn" id="btn-clear-queue">Clear Queue</button>
-        <button class="btn" id="btn-remove-done">Remove Done</button>
-        <button class="btn" id="btn-remove-failed">Remove Failed</button>
-        <button class="btn btn-danger" id="btn-clear-all">Clear All</button>
-        <a class="btn" href="/submitter" style="margin-left:auto"
-           title="Turn a client CSV into pooled, split jobs with a saved recipe">Submitter</a>
-        <button class="btn btn-success" id="btn-new-job"
-                title="Queue new scenes straight from the dashboard">+ New Job</button>
+      <!-- Action bar. Per-selection actions (Edit, Requeue, Freeze, Remove…)
+           live in the right-click context menu on job rows; only queue-wide
+           actions, which have no per-row home, stay as buttons. Submitter and
+           New job are docked to the right, away from the destructive ones. -->
+      <div class="jobs-actions">
+        <div class="jobs-actions-group">
+          <button class="btn btn-outline" id="btn-clear-queue">Clear queue</button>
+          <button class="btn btn-outline" id="btn-remove-done">Remove done</button>
+          <button class="btn btn-outline" id="btn-remove-failed">Remove failed</button>
+          <button class="btn btn-outline btn-danger" id="btn-clear-all">Clear all</button>
+        </div>
+        <div class="jobs-actions-group">
+          <a class="btn btn-solid" href="/submitter"
+             title="Turn a client CSV into pooled, split jobs with a saved recipe">Submitter</a>
+          <button class="nbtn nbtn-sm nbtn-yellow" id="btn-new-job" title="Queue new scenes straight from the dashboard">
+            <svg class="nbtn-shape" aria-hidden="true"><path/></svg><span class="nbtn-icon" aria-hidden="true"><span class="nbtn-i"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M11 11V5h2v6h6v2h-6v6h-2v-6H5v-2z"/></svg></span><span class="nbtn-i nbtn-i-in"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M11 11V5h2v6h6v2h-6v6h-2v-6H5v-2z"/></svg></span></span><span class="nbtn-label">New job</span>
+          </button>
+        </div>
       </div>
 
       <!-- Safety net: if the columns still can't fit (very narrow window), the
@@ -199,7 +219,7 @@
             <th>Duration</th>
             <th>Att.</th>
             <th>Updated</th>
-            <th>Last Error</th>
+            <th>Last error</th>
             <th class="col-edit"></th>
           </tr>
         </thead>
@@ -208,7 +228,7 @@
         </tbody>
       </table>
       </div>
-      <div class="foot" id="jobs-foot">—</div>
+      <div class="foot" id="jobs-foot">Right-click a row for actions.</div>
     </section>
 
     <!-- ── Job modal: Edit Job / New Job (one shared form) ────────────── -->

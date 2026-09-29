@@ -211,15 +211,13 @@ async function copyText(text) {
 function statusChip(status) {
   const norm = String(status || "").trim().toLowerCase();
   const cls = ({queued:"queued",claimed:"running",running:"running",done:"done",success:"done",failed:"failed",idle:"idle"})[norm] || "idle";
-  return `<span class="chip ${cls}">${esc(status||"-")}</span>`;
+  const label = norm ? norm.charAt(0).toUpperCase() + norm.slice(1) : "—";
+  return `<span class="chip ${cls}">${esc(label)}</span>`;
 }
 
 function workerCell(name) {
-  if (!name || name === "-") return `<span style="color:var(--text-muted)">—</span>`;
-  const { color, faint, border } = workerColors(name);
-  return `<span class="worker-pill" style="color:${color};background:${faint};border-color:${border}">
-    <span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${color};flex-shrink:0"></span>${esc(name)}
-  </span>`;
+  if (!name || name === "-") return `<span class="cell-muted">—</span>`;
+  return `<span class="worker-cell"><span class="w-dot" style="background:${colorForWorker(name)}"></span>${esc(name)}</span>`;
 }
 
 function shortPath(p, parts = 3) {
@@ -304,7 +302,10 @@ function renderStats(data) {
   // Progress left column
   $("progress-pct").textContent = pct + "%";
   $("progress-done").textContent = done;
-  $("progress-bar").style.width = pct + "%";
+  const share = (n) => (total ? (n * 100) / total : 0) + "%";
+  $("bar-done").style.width    = share(done);
+  $("bar-running").style.width = share(running);
+  $("bar-failed").style.width  = share(failed);
   $("progress-text").textContent = `of ${total} jobs complete`;
 
   // Stat row
@@ -323,34 +324,38 @@ function renderStats(data) {
 
 function renderWorkers(workers) {
   const list = $("workers-list");
-  const onlineCount = workers.filter((w) => w.status !== "offline").length;
-  const allIdle     = workers.every((w) => (w.status || "").toLowerCase() === "idle");
+  const stateOf = (w) => {
+    const st = (w.status || "").toLowerCase();
+    return st === "offline" ? "offline" : (st === "idle" || !st) ? "idle" : "busy";
+  };
+  const onlineCount = workers.filter((w) => stateOf(w) !== "offline").length;
+  const busyCount   = workers.filter((w) => stateOf(w) === "busy").length;
   $("workers-status").textContent = workers.length
-    ? `${onlineCount} online · ${allIdle ? "all idle" : "working"}`
+    ? `${onlineCount} online · ${busyCount ? busyCount + " busy" : "all idle"}`
     : "none connected";
 
   if (!workers.length) {
-    list.innerHTML = '<div class="worker-row"><div class="worker-item__left"><div><div class="worker-item__name" style="color:var(--text-muted)">No workers connected.</div></div></div></div>';
+    list.innerHTML = '<div class="worker-row"><div class="worker-item__meta">No workers connected.</div><span></span></div>';
     return;
   }
 
+  // Colored left edge + a faint wash of the worker's color (neither when
+  // offline), name + what it's doing, and a state pill.
   list.innerHTML = workers.map((w) => {
-    const { color, tint } = workerColors(w.name);
+    const state = stateOf(w);
+    const name  = String(w.name || "?");
+    const { color, faint } = workerColors(name);
+    const scene = shortPath(w.current_scene || "", 1).replace(/\.max$/i, "");
     const sub = w.current_scene
-      ? esc(shortPath(w.current_scene, 2))
-      : `last seen ${esc(fmtTime(w.last_seen_ts))}`;
+      ? `Rendering ${esc(scene)}`
+      : `Last seen ${esc(fmtTime(w.last_seen_ts))}`;
     return `
-    <div class="worker-row" style="--worker-color:${color};--worker-tint:${tint}">
-      <div class="worker-item__left">
-        <div class="worker-item__dot"></div>
-        <div>
-          <div class="worker-item__name">${esc(w.name)}</div>
-          <div class="worker-item__meta">${sub}</div>
-        </div>
+    <div class="worker-row ${state}" style="--worker-color:${color};--worker-tint:${faint}">
+      <div style="min-width:0">
+        <div class="worker-item__name">${esc(name)}</div>
+        <div class="worker-item__meta" title="${esc(w.current_scene || "")}">${sub}</div>
       </div>
-      <div class="worker-item__right">
-        ${statusChip(w.status)}
-      </div>
+      <span class="worker-state ${state}">${state}</span>
     </div>`;
   }).join("");
 }
@@ -371,7 +376,6 @@ function updateTabCounts(jobs) {
     const el = $(`tab-cnt-${k}`);
     if (el) el.textContent = by[k];
   }
-  $("jobs-total-badge").textContent = `${jobs.length} total`;
 }
 
 function visibleJobs(jobs) {
@@ -407,6 +411,7 @@ function renderJobs(jobs) {
 
   if (!shown.length) {
     tbody.innerHTML = `<tr><td colspan="10" class="empty">No jobs${jobTabFilter !== "all" ? " in this filter" : ""}.</td></tr>`;
+    $("jobs-foot").textContent = "Right-click a row for actions.";
     updateSelectionUI(0);
     return;
   }
@@ -440,7 +445,7 @@ function renderJobs(jobs) {
       ? `<span class="drag-grip" title="Drag to reorder">${GRIP_ICON}</span>`
       : "";
     const statusCell = j.frozen
-      ? `<span class="chip frozen" title="Frozen — skipped until unfrozen">❄ frozen</span>`
+      ? `<span class="chip frozen" title="Frozen — skipped until unfrozen">❄ Frozen</span>`
       : statusChip(j.status);
     return `<tr class="${rowCls.trim()}" data-job-id="${esc(j.job_id)}"${dragAttr}>
       <td class="col-grip">${grip}</td>
@@ -448,15 +453,15 @@ function renderJobs(jobs) {
       <td class="col-output">${outCell}</td>
       <td>${statusCell}</td>
       <td>${workerCell(j.worker_name || null)}</td>
-      <td title="${esc(tip)}" style="font-variant-numeric:tabular-nums">${esc(fmtDuration(j.duration_seconds))}</td>
-      <td style="color:var(--text-muted)">${esc(j.attempts)}</td>
-      <td style="color:var(--text-muted);font-size:0.75rem">${esc(fmtTime(j.updated_at_ts))}</td>
+      <td title="${esc(tip)}" style="font-variant-numeric:tabular-nums;white-space:nowrap">${esc(fmtDuration(j.duration_seconds))}</td>
+      <td>${esc(j.attempts || "—")}</td>
+      <td class="cell-muted" style="font-variant-numeric:tabular-nums">${esc(fmtTime(j.updated_at_ts))}</td>
       <td class="col-error">${errCell}</td>
       <td class="col-edit"><button class="edit-btn" data-edit="${esc(j.job_id)}" title="Edit render/output settings" aria-label="Edit job settings">${EDIT_ICON}</button></td>
     </tr>`;
   }).join("");
 
-  $("jobs-foot").textContent = `${shown.length} of ${jobs.length} jobs`;
+  $("jobs-foot").textContent = `${shown.length} of ${jobs.length} jobs · Right-click a row for actions.`;
   updateSelectionUI(shown.length);
 }
 
@@ -563,10 +568,18 @@ function renderStatStrip(filteredJobs) {
   $("stat-max").textContent    = durs.length ? fmtDuration(Math.max(...durs)) : "—";
 }
 
-// ── SVG chart helpers ─────────────────────────────────────────────────────────
+// ── Horizontal bars ───────────────────────────────────────────────────────────
 
-// ── Pie / donut ───────────────────────────────────────────────────────────────
+// One labelled bar per worker: name + value above a track filled to `pct`.
+function hbarRows(rows) {
+  return rows.map(({ name, value, pct }) => `
+    <div class="hbar">
+      <div class="hbar-head"><span class="hbar-name">${esc(name)}</span><span class="hbar-val">${esc(value)}</span></div>
+      <div class="hbar-track"><div class="hbar-fill" style="width:${pct.toFixed(1)}%;background:${colorForWorker(name)}"></div></div>
+    </div>`).join("");
+}
 
+// Jobs by worker: completed job count, busiest first.
 function renderPieChart(el, filteredJobs) {
   if (!filteredJobs.length) {
     el.innerHTML = '<div class="chart-empty">No data for selected filters.</div>';
@@ -579,63 +592,20 @@ function renderPieChart(el, filteredJobs) {
   }
   const workers = Object.keys(byWorker).sort((a, b) => byWorker[b] - byWorker[a]);
   const total   = filteredJobs.length;
+  const maxC    = Math.max(1, ...workers.map((n) => byWorker[n]));
 
-  const W = 240, H = 180;
-  const cx = 80, cy = 82, rO = 60, rI = 34;
-  const r  = (rO + rI) / 2;          // stroke centerline radius
-  const sw = rO - rI;                // ring thickness
-  const C  = 2 * Math.PI * r;        // circumference
-  const gapLen = workers.length > 1 ? 2 : 0;  // gap between segments, in path units
+  const top = workers[0];
+  const insight = workers.length > 1
+    ? `${top} handled the most jobs (${Math.round(byWorker[top] * 100 / total)}%).`
+    : `${top} handled all ${total} jobs.`;
 
-  // Each segment is a stroked circle: draw `frac` of the circumference,
-  // rotated to its start angle. No arc-flag math, so it can't fold over.
-  let acc = 0;                       // accumulated fraction (0..1)
-  const arcs = workers.map((name) => {
-    const frac  = byWorker[name] / total;
-    const start = acc;
-    acc += frac;
-    return { name, count: byWorker[name], frac, start };
-  });
-
-  const paths = arcs.map(({ name, frac, start }) => {
-    const col    = colorForWorker(name);
-    const segLen = Math.max(frac * C - gapLen, 0);
-    const rot    = start * 360 - 90;   // -90 so the ring starts at 12 o'clock
-    return `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${col}" stroke-width="${sw}" stroke-dasharray="${segLen.toFixed(2)} ${C.toFixed(2)}" transform="rotate(${rot.toFixed(2)} ${cx} ${cy})"/>`;
-  }).join("");
-
-  const centerLabel = `
-    <text x="${cx}" y="${cy - 5}" text-anchor="middle" font-size="22" font-weight="700" fill="var(--text)">${total}</text>
-    <text x="${cx}" y="${cy + 11}" text-anchor="middle" font-size="9" fill="var(--text-muted)">jobs</text>`;
-
-  const legX = 152;
-  let legY = 22;
-  const legend = arcs.map(({ name, count, frac }) => {
-    const pct = Math.round(frac * 100);
-    const col = colorForWorker(name);
-    const row = `
-      <circle cx="${legX}" cy="${legY}" r="4" fill="${col}"/>
-      <text x="${legX + 11}" y="${legY + 4}" font-size="11" fill="var(--text)">${esc(name)}</text>
-      <text x="${W - 2}" y="${legY + 4}" text-anchor="end" font-size="9.5" fill="var(--text-muted)">${count} · ${pct}%</text>`;
-    legY += 21;
-    return row;
-  }).join("");
-
-  const topW = arcs[0];
-  const insight = (topW && arcs.length > 1)
-    ? `${topW.name} handled the most jobs (${Math.round(topW.frac*100)}%).`
-    : topW ? `${topW.name} handled all ${total} jobs.` : "";
-
-  el.innerHTML = `
-    <svg width="100%" viewBox="0 0 ${W} ${H}" style="max-height:190px">
-      ${paths}${centerLabel}
-      <g>${legend}</g>
-    </svg>
-    ${insight ? `<div class="chart-insight">${esc(insight)}</div>` : ""}`;
+  el.innerHTML = hbarRows(workers.map((name) => ({
+      name, value: byWorker[name], pct: (byWorker[name] / maxC) * 100,
+    })))
+    + `<div class="chart-insight">${esc(insight)}</div>`;
 }
 
-// ── Bar chart ─────────────────────────────────────────────────────────────────
-
+// Avg duration by worker: fastest first.
 function renderBarChart(el, filteredJobs) {
   if (!filteredJobs.length) {
     el.innerHTML = '<div class="chart-empty">No data for selected filters.</div>';
@@ -647,117 +617,85 @@ function renderBarChart(el, filteredJobs) {
     if (!dursByWorker[n]) dursByWorker[n] = [];
     if ((j.duration_seconds || 0) > 0) dursByWorker[n].push(j.duration_seconds);
   }
-  const workers = Object.keys(dursByWorker).sort((a, b) => {
-    const avg = (d) => d.reduce((s, v) => s + v, 0) / (d.length || 1);
-    return avg(dursByWorker[a]) - avg(dursByWorker[b]);
-  });
+  const avgOf = (d) => d.length ? d.reduce((a, b) => a + b, 0) / d.length : 0;
+  const workers = Object.keys(dursByWorker)
+    .filter((n) => dursByWorker[n].length)
+    .sort((a, b) => avgOf(dursByWorker[a]) - avgOf(dursByWorker[b]));
   if (!workers.length) {
     el.innerHTML = '<div class="chart-empty">No duration data.</div>';
     return;
   }
 
-  const avgs   = workers.map((n) => {
-    const d = dursByWorker[n];
-    return d.length ? d.reduce((a, b) => a + b, 0) / d.length : 0;
-  });
+  const avgs   = workers.map((n) => avgOf(dursByWorker[n]));
   const maxAvg = Math.max(...avgs, 1);
-
-  const W = 300, barH = 20, gap = 10, labelW = 86, barMaxW = W - labelW - 54;
-  const H = workers.length * (barH + gap) + 8;
-
-  let bars = "";
-  workers.forEach((name, i) => {
-    const avg = avgs[i];
-    const bw  = Math.round((avg / maxAvg) * barMaxW);
-    const y   = 4 + i * (barH + gap);
-    const col = colorForWorker(name);
-    bars += `
-      <text x="${labelW - 6}" y="${y + barH/2 + 4}" text-anchor="end" font-size="11" fill="var(--text)">${esc(name)}</text>
-      <rect x="${labelW}" y="${y}" width="${bw}" height="${barH}" rx="3" fill="${col}"/>
-      <text x="${labelW + bw + 5}" y="${y + barH/2 + 4}" font-size="9.5" fill="var(--text-muted)">${fmtDuration(avg)}</text>`;
-  });
 
   let insight = "";
   if (workers.length > 1) {
-    const ratio = avgs[avgs.length-1] / avgs[0];
-    insight = `${esc(workers[0])} fastest · ${esc(workers[workers.length-1])} ~${Math.round((ratio-1)*100)}% slower.`;
+    const ratio = avgs[avgs.length - 1] / avgs[0];
+    insight = `${workers[0]} fastest · ${workers[workers.length - 1]} ~${Math.round((ratio - 1) * 100)}% slower.`;
   }
 
-  el.innerHTML = `
-    <svg width="100%" viewBox="0 0 ${W} ${H}" style="max-height:220px">
-      ${bars}
-    </svg>
-    ${insight ? `<div class="chart-insight">${insight}</div>` : ""}`;
+  el.innerHTML = hbarRows(workers.map((name, i) => ({
+      name, value: fmtDuration(avgs[i]), pct: (avgs[i] / maxAvg) * 100,
+    })))
+    + (insight ? `<div class="chart-insight">${esc(insight)}</div>` : "");
 }
 
-// ── Swimlane ──────────────────────────────────────────────────────────────────
+// ── Timeline ──────────────────────────────────────────────────────────────────
 
+function fmtClock(ts) {
+  const d = new Date(ts * 1000);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+// Recent activity: one lane per worker, one block per render placed at its
+// start time, width = duration. Jobs still rendering run up to "now" at half
+// opacity; failed renders are red.
 function renderSwimlane(el, filteredJobs) {
-  if (!filteredJobs.length) {
+  const now = lastSnapshot ? (lastSnapshot.now_ts || Date.now() / 1000) : Date.now() / 1000;
+  const wantWorker = perfFilter.workers.size ? perfFilter.workers : null;
+  const running = ((lastSnapshot && lastSnapshot.jobs) || []).filter((j) => {
+    const st = (j.status || "").toLowerCase();
+    return (st === "running" || st === "claimed") && j.started_at_ts
+      && (!wantWorker || wantWorker.has(j.worker_name));
+  });
+  const blocks = [
+    ...filteredJobs.filter((j) => j.started_at_ts && j.finished_at_ts)
+      .map((j) => ({ j, end: j.finished_at_ts, live: false })),
+    ...running.map((j) => ({ j, end: now, live: true })),
+  ];
+  if (!blocks.length) {
     el.innerHTML = '<div class="chart-empty">No data for selected filters.</div>';
     return;
   }
-  const workerMap = {};
-  for (const j of filteredJobs) {
-    if (!j.started_at_ts || !j.finished_at_ts) continue;
-    const n = j.worker_name || "Unknown";
-    if (!workerMap[n]) workerMap[n] = [];
-    workerMap[n].push(j);
+
+  const lanes = {};
+  for (const b of blocks) {
+    const n = b.j.worker_name || "Unknown";
+    (lanes[n] = lanes[n] || []).push(b);
   }
-  const workers = Object.keys(workerMap).sort();
-  if (!workers.length) {
-    el.innerHTML = '<div class="chart-empty">No timeline data (jobs need started/finished timestamps).</div>';
-    return;
-  }
+  const workers = Object.keys(lanes).sort();
 
-  const now   = lastSnapshot ? (lastSnapshot.now_ts || Date.now()/1000) : Date.now()/1000;
-  const allS  = filteredJobs.map((j) => j.started_at_ts).filter(Boolean);
-  const wSt   = allS.length ? Math.min(...allS) - 60 : now - 3600;
-  const wEnd  = now;
-  const wSecs = Math.max(wEnd - wSt, 60);
+  const wSt   = Math.min(...blocks.map((b) => b.j.started_at_ts)) - 60;
+  const wSecs = Math.max(now - wSt, 60);
+  const pos   = (ts) => Math.min(100, Math.max(0, ((ts - wSt) / wSecs) * 100));
 
-  const W = 600, rowH = 26, gap = 6, labelW = 76, axisH = 18, padT = 2;
-  const barH   = 16;
-  const barW   = W - labelW - 4;
-  const H      = workers.length * (rowH + gap) + axisH + padT;
-  const tx     = (ts) => labelW + Math.round(((ts - wSt) / wSecs) * barW);
-
-  // axis ticks
-  let axisG = "";
-  for (let i = 0; i <= 4; i++) {
-    const ts  = wSt + (wSecs * i) / 4;
-    const x   = tx(ts);
-    const rel = ts - now;
-    const lbl = Math.abs(rel) < 30 ? "now"
-              : rel < 0 ? `-${Math.round(Math.abs(rel)/60)}m`
-              : `+${Math.round(rel/60)}m`;
-    axisG += `<line x1="${x}" y1="${padT}" x2="${x}" y2="${H-axisH}" stroke="var(--border)" stroke-width="1" opacity="0.5"/>
-      <text x="${x}" y="${H}" text-anchor="middle" font-size="9" fill="var(--text-muted)">${esc(lbl)}</text>`;
-  }
-
-  // worker rows
-  let rowsG = "";
-  workers.forEach((name, i) => {
-    const y   = padT + i * (rowH + gap);
+  const rows = workers.map((name) => {
     const col = colorForWorker(name);
-    rowsG += `<text x="${labelW-5}" y="${y+rowH/2+4}" text-anchor="end" font-size="10" fill="var(--text)">${esc(name)}</text>`;
-    rowsG += `<rect x="${labelW}" y="${y+5}" width="${barW}" height="${rowH-10}" rx="2" fill="var(--bg-card)" opacity="0.6"/>`;
-    for (const j of workerMap[name]) {
-      const x1 = tx(j.started_at_ts);
-      const x2 = tx(j.finished_at_ts);
-      const bw = Math.max(x2 - x1, 2);
-      const bx = Math.max(x1, labelW);
-      const cl = Math.min(bx + bw, labelW + barW) - bx;
-      if (cl <= 0) continue;
-      rowsG += `<rect x="${bx}" y="${y+6}" width="${cl}" height="${barH-4}" rx="2" fill="${col}">
-        <title>${esc(j.scene_name || j.job_id)} · ${fmtDuration(j.duration_seconds)}</title>
-      </rect>`;
-    }
-  });
+    const spans = lanes[name].map(({ j, end, live }) => {
+      const left  = pos(j.started_at_ts);
+      const width = Math.max(pos(end) - left, 0);
+      const failed = (j.status || "").toLowerCase() === "failed";
+      const dur = live ? now - j.started_at_ts : j.duration_seconds;
+      const tip = `${j.scene_name || j.job_id} · ${fmtDuration(dur)}${live ? " (rendering)" : failed ? " (failed)" : ""}`;
+      return `<span class="tl-block" title="${esc(tip)}" style="left:${left.toFixed(2)}%;width:${width.toFixed(2)}%;background:${failed ? "var(--red)" : col};opacity:${live ? 0.55 : 1}"></span>`;
+    }).join("");
+    return `<div class="tl-row"><span class="tl-name" title="${esc(name)}">${esc(name)}</span><div class="tl-track">${spans}</div></div>`;
+  }).join("");
 
-  el.innerHTML = `<svg width="100%" viewBox="0 0 ${W} ${H}" style="min-height:100px">
-    <g>${axisG}</g><g>${rowsG}</g>
-  </svg>`;
+  el.innerHTML = `<div class="tl">${rows}
+    <div class="tl-axis"><span>${esc(fmtClock(wSt))}</span><span>${esc(fmtClock(now))} now</span></div>
+  </div>`;
 }
 
 // ── Render all performance ───────────────────────────────────────────────────
@@ -866,17 +804,75 @@ async function actClearAll() {
   } catch (e) { toast("Clear all failed: " + e.message, true); }
 }
 
-// Big square queue toggle: icon above the word. Paused turns it green, so
+// Big notched queue toggle: icon circle + word. Paused turns it yellow, so
 // "Resume" reads as the obvious next action.
-const PAUSE_SVG = `<svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><rect x="6" y="4.5" width="4" height="15" rx="1"/><rect x="14" y="4.5" width="4" height="15" rx="1"/></svg>`;
-const PLAY_SVG  = `<svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M8 4.8v14.4a1 1 0 0 0 1.5.86l11.2-7.2a1 1 0 0 0 0-1.72L9.5 3.94A1 1 0 0 0 8 4.8z"/></svg>`;
+const PAUSE_SVG = `<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4.5" width="4" height="15" rx="1"/><rect x="14" y="4.5" width="4" height="15" rx="1"/></svg>`;
+const PLAY_SVG  = `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 4.8v14.4a1 1 0 0 0 1.5.86l11.2-7.2a1 1 0 0 0 0-1.72L9.5 3.94A1 1 0 0 0 8 4.8z"/></svg>`;
+
+// The notched button's icon is drawn twice: on hover the first copy slides
+// out the top while the second slides in from below.
+const nbtnIcon = (svg) => `<span class="nbtn-i">${svg}</span><span class="nbtn-i nbtn-i-in">${svg}</span>`;
+
+// Notched button outline, W x H px: the icon circle on the left, a pinched
+// notch, then the pill body with a round right cap. Traced from the unlit.studio
+// "Gratis demo" button (drawn at height 48, scaled by H/48). With pinch=false
+// the notch vertices sit on the top/bottom edges instead, which gives a plain
+// pill with the same vertex list, so CSS can morph between the two.
+function notchedPath(W, H, pinch) {
+  const s = H / 48, r = H / 2, k = 0.5523 * r;
+  const X = (v) => (v * s).toFixed(2);
+  const top = (v) => (pinch ? v * s : 0).toFixed(2);
+  const bot = (v) => (pinch ? H - v * s : H).toFixed(2);
+  const e = Math.max(W - r, 65.02 * s);   // where the right cap starts
+  const f = (v) => v.toFixed(2);
+  return [
+    `M${f(r)} 0`,
+    `C${X(29.97)} ${top(0)} ${X(35.29)} ${top(2.02)} ${X(39.47)} ${top(5.39)}`,
+    `C${X(42.32)} ${top(7.69)} ${X(47.06)} ${top(7.67)} ${X(49.90)} ${top(5.36)}`,
+    `C${X(54.03)} ${top(2.01)} ${X(59.29)} 0 ${X(65.02)} 0`,
+    `L${f(e)} 0`,
+    `C${f(e + k)} 0 ${f(e + r)} ${f(r - k)} ${f(e + r)} ${f(r)}`,
+    `C${f(e + r)} ${f(r + k)} ${f(e + k)} ${f(H)} ${f(e)} ${f(H)}`,
+    `L${X(65.02)} ${f(H)}`,
+    `C${X(59.29)} ${f(H)} ${X(54.03)} ${bot(2.01)} ${X(49.90)} ${bot(5.36)}`,
+    `C${X(47.06)} ${bot(7.67)} ${X(42.32)} ${bot(7.69)} ${X(39.47)} ${bot(5.39)}`,
+    `C${X(35.29)} ${bot(2.02)} ${X(29.97)} ${bot(0)} ${f(r)} ${f(H)}`,
+    `C${f(r - k)} ${f(H)} 0 ${f(r + k)} 0 ${f(r)}`,
+    `C0 ${f(r - k)} ${f(r - k)} 0 ${f(r)} 0Z`,
+  ].join("");
+}
+
+// Size each notched button's SVG to the button. Re-run by a ResizeObserver,
+// because the width changes with the label (Pause / Resume) and the web font.
+function layoutNotchedButton(btn) {
+  const W = btn.offsetWidth, H = btn.offsetHeight;
+  const svg = btn.querySelector(".nbtn-shape");
+  const path = svg && svg.querySelector("path");
+  if (!path || !W || !H) return;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  const rest = notchedPath(W, H, true);
+  path.setAttribute("d", rest);   // fallback where CSS `d` isn't supported
+  path.style.setProperty("--nb-rest", `path("${rest}")`);
+  path.style.setProperty("--nb-hover", `path("${notchedPath(W, H, false)}")`);
+}
+
+function layoutNotchedButtons() {
+  const buttons = document.querySelectorAll(".nbtn");
+  const ro = window.ResizeObserver
+    ? new ResizeObserver((entries) => entries.forEach((en) => layoutNotchedButton(en.target)))
+    : null;
+  for (const btn of buttons) {
+    layoutNotchedButton(btn);
+    if (ro) ro.observe(btn);
+  }
+}
 
 function renderPauseButton(paused) {
   const btn = $("btn-pause");
   if (btn.dataset.paused === String(paused)) return;   // avoid rebuilding every poll
   btn.dataset.paused = String(paused);
-  btn.classList.toggle("is-paused", paused);
-  btn.querySelector(".pause-icon").innerHTML = paused ? PLAY_SVG : PAUSE_SVG;
+  btn.classList.toggle("nbtn-yellow", paused);
+  btn.querySelector(".pause-icon").innerHTML = nbtnIcon(paused ? PLAY_SVG : PAUSE_SVG);
   btn.querySelector(".pause-label").textContent = paused ? "Resume" : "Pause";
   btn.title = paused
     ? "Resume the queue: workers start claiming jobs again"
@@ -1882,5 +1878,6 @@ function wire() {
 }
 
 wire();
+layoutNotchedButtons();
 loadData();
 setInterval(loadData, CFG.poll_ms);

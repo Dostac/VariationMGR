@@ -78,11 +78,33 @@ The dashboard is plain HTML/CSS/JS served by the HTTP API and rendered by
 worker table, job table (with a per-row copy-output-path button), progress, and
 performance charts.
 
-The top bar holds only the title, a status badge that reads Active or Paused
-(orange), and the big square Pause/Resume button (`renderPauseButton`). The
-old HTTP / workers / queue / ETA / last-updated pills were removed as noise.
+**Visual style** follows unlit.studio (the Unlit design system): Rethink Sans
+(loaded from Google Fonts without blocking render, falling back to the system
+font offline), the site palette as `:root` tokens (grey-950 `#191b1b` page,
+grey-900 panels, grey-800 borders, blue-600 `#1b40f5` progress panel, yellow-200
+`#f5f78c` accent), and pill-shaped controls. `body.dash` scopes the big
+dashboard sizes, so the Submitter page, which shares this stylesheet, stays
+compact. The Pause and New job buttons are `.nbtn` notched buttons, like the
+site's "Gratis demo" button. Each is one SVG path (`.nbtn-shape`): an icon
+circle, a pinched notch, and a pill body. `notchedPath()` builds it for the
+button's pixel size, and `layoutNotchedButtons()` re-runs it via a
+ResizeObserver (the label and web font change the width). The path is passed
+twice as CSS vars with the same vertex list: `--nb-rest` (notch pinched) and
+`--nb-hover` (notch vertices flattened, giving a plain pill). A CSS `d`
+transition morphs between them, while the icon slides out and a copy slides in
+(`nbtnIcon()`). Worker rows have a rounded 4px bar in the worker's color, inset
+from the card's left edge (`.worker-row::before`), over a faint wash of that
+color (`faint`, 0.10 alpha). Offline rows get a grey bar and no wash. Jobs by worker and Avg duration are HTML bar lists (`hbarRows`). The
+Recent activity timeline also draws jobs still rendering, at half opacity, up
+to now, and draws failed jobs in red.
+
+The top bar holds only the title, a status badge that reads Active (yellow) or
+Paused (grey), and the big Pause/Resume notched button (`renderPauseButton`
+turns it yellow while paused). The old HTTP / workers / queue / ETA /
+last-updated pills were removed as noise.
 The ETA now sits in the progress panel, next to the done count (`eta-value` /
-`eta-label`). A failed poll still raises an error toast, so no "last updated"
+`eta-label`). The progress bar is stacked: done (white), running (yellow) and
+failed (black). A failed poll still raises an error toast, so no "last updated"
 clock is needed. The Performance panel collapses from its title
 (`togglePerfPanel`). The state is kept in localStorage as `vb_perf_collapsed`,
 and the charts are not rendered while collapsed. In the job table, the Scene,
