@@ -1,6 +1,7 @@
 from PySide6 import QtWidgets, QtCore
 import os
 import re
+import json
 import fnmatch
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".exr", ".hdr", ".tga", ".bmp"}
@@ -55,13 +56,39 @@ def _collect_bitmaps(rt, node, _seen=None):
     return results
 
 
+_RES_TAG_RE = re.compile(r"^(\d+)k$", re.IGNORECASE)   # 1K, 2k, 4K, 8K …
+
+
 def _find_res_folder(path):
-    """Return 8k > 4k subfolder if present, otherwise the folder itself."""
-    for res in ("8k", "4k"):
-        candidate = os.path.join(path, res)
-        if os.path.isdir(candidate):
-            return candidate
-    return path
+    """
+    Return the highest-resolution subfolder (8K > 4K > 2K …, any case),
+    otherwise the folder itself.  Reawote / Poliigon folders keep one
+    subfolder per resolution next to metadata.json and PREVIEW/.
+    """
+    try:
+        entries = os.listdir(path)
+    except OSError:
+        return path
+    best, best_val = None, -1
+    for name in entries:
+        m = _RES_TAG_RE.match(name)
+        if not m or not os.path.isdir(os.path.join(path, name)):
+            continue
+        val = int(m.group(1))
+        if val > best_val:
+            best, best_val = name, val
+    return os.path.join(path, best) if best else path
+
+
+def _list_image_files(folder):
+    """Sorted image filenames in folder (one listing per run — the NAS is slow)."""
+    try:
+        return sorted(
+            f for f in os.listdir(folder)
+            if os.path.splitext(f)[1].lower() in IMAGE_EXTS
+        )
+    except OSError:
+        return []
 
 
 def _parse_size_to_cm(size_str, default_cm=100.0):
@@ -82,9 +109,47 @@ def _parse_size_to_cm(size_str, default_cm=100.0):
         return default_cm
 
 
+def _load_json_lenient(path):
+    """json.load that tolerates the trailing commas some Reawote metadata.json files ship with."""
+    with open(path, "r", encoding="utf-8-sig") as f:
+        text = f.read()
+    try:
+        return json.loads(text)
+    except ValueError:
+        return json.loads(re.sub(r",\s*([}\]])", r"\1", text))
+
+
+def _read_scale_from_metadata_json(folder_path):
+    """
+    Physical size from metadata.json (Reawote / Unlit-Manager format):
+        {"TEXTURE_SIZE": {"cm": {"width": 21.634, "height": 21.555}, ...}}
+    Returns (u_cm, v_cm) or None if absent / unreadable / zero.
+    """
+    meta = os.path.join(folder_path, "metadata.json")
+    if not os.path.isfile(meta):
+        return None
+    try:
+        data = _load_json_lenient(meta)
+        cm = (data.get("TEXTURE_SIZE") or {}).get("cm") or {}
+        w, h = float(cm.get("width", 0) or 0), float(cm.get("height", 0) or 0)
+        if w > 0 and h > 0:
+            return w, h
+    except Exception as e:
+        print(f"[MatFromFolder] metadata.json unreadable in {folder_path}: {e}")
+    return None
+
+
 def _read_scale_from_metadata(folder_path):
     """
-    Parse physical dimensions from METADATA.txt.
+    Texture size in cm from the folder's metadata — metadata.json first,
+    legacy METADATA.txt as fallback.  Returns (u_cm, v_cm) or None.
+    """
+    return _read_scale_from_metadata_json(folder_path) or _read_scale_from_metadata_txt(folder_path)
+
+
+def _read_scale_from_metadata_txt(folder_path):
+    """
+    Parse physical dimensions from legacy METADATA.txt.
     Returns (u_cm, v_cm) or None if absent / unparseable.
 
     Handles European comma decimals, unit-per-value, and trailing unit:
@@ -128,7 +193,110 @@ def _read_scale_from_metadata(folder_path):
         return None
 
 
-def _swap_bitmaps(rt, node, override_map, folder, scale_mode, scale_u, scale_v, _seen=None):
+# Map-token vocabulary (mirrors Unlit-Manager's pbr_tokens).  One group per
+# texture slot; the first entry is the Reawote short name and the display form.
+# Groups stay separate where one folder ships both variants
+# (ROUGH vs GLOSS, NRM vs NRM16, DISP vs DISP16).
+MAP_TOKENS = (
+    ("COL", "COLOR", "COLOUR", "DIFF", "DIFFUSE", "BASECOLOR", "ALBEDO"),
+    ("AO", "AMBIENTOCCLUSION", "OCCLUSION"),
+    ("ROUGH", "ROUGHNESS"),
+    ("GLOSS", "GLOSSINESS"),
+    ("METAL", "METALNESS", "METALLIC"),
+    ("OPAC", "OPACITY", "ALPHA"),
+    ("NRM16",),
+    ("NRM", "NORMAL", "NORM"),
+    ("DISP16", "HEIGHT16"),
+    ("DISP", "DISPLACEMENT", "DISPLACE", "HEIGHT"),
+    ("REFL", "REFLECTION", "SPEC", "SPECULAR"),
+    ("BUMP",),
+    ("EMIS", "EMISSIVE", "EMISSION"),
+    ("SSS", "TRANSLUCENCY", "TRANSL"),
+)
+_TOKEN_GROUP = {tok: group for group in MAP_TOKENS for tok in group}
+AUTO_PREFIX = "auto:"
+
+
+def _name_segments(name):
+    """Upper-cased alphanumeric segments of a node or file name (image extension dropped)."""
+    stem, ext = os.path.splitext(name or "")
+    if ext.lower() not in IMAGE_EXTS:
+        stem = name or ""
+    return [p.upper() for p in re.split(r"[^A-Za-z0-9]+", stem) if p]
+
+
+def _auto_pattern(node_name):
+    """
+    Derive an 'auto:TOKEN' pattern from a bitmap node name, or "" if no map
+    token is recognised.  Segments are scanned from the right, case-insensitive,
+    so "COL", "Wood col", "Diffuse Color" and "Oak_COL_4K.jpg" all give "auto:COL".
+    """
+    for seg in reversed(_name_segments(node_name)):
+        group = _TOKEN_GROUP.get(seg)
+        if group:
+            return AUTO_PREFIX + group[0]
+    return ""
+
+
+def _file_token(filename):
+    """
+    Map token of a texture filename: the last stem segment, or the one before
+    it when the last segment is a resolution tag.
+        "X_COL_4K.jpg"          → "COL"
+        "Wood_4K_Color.png"     → "COLOR"
+        "TCom_Y_4K_albedo.tif"  → "ALBEDO"
+    """
+    segs = _name_segments(filename)
+    if len(segs) >= 2 and _RES_TAG_RE.match(segs[-1]):
+        return segs[-2]
+    return segs[-1] if segs else ""
+
+
+def _match_token(token, files):
+    """
+    First file whose map token equals `token` or one of its aliases
+    (group order — Reawote short name first).  Falls back to the token as a
+    whole segment anywhere in the name, then to a plain substring.
+    """
+    token = token.strip().upper()
+    if not token:
+        return None
+    group = _TOKEN_GROUP.get(token, (token,))
+    aliases = [token] + [a for a in group if a != token]
+    by_token = {}
+    for f in files:
+        by_token.setdefault(_file_token(f), []).append(f)
+    for alias in aliases:
+        if alias in by_token:
+            return by_token[alias][0]
+    for f in files:
+        if token in _name_segments(f):
+            return f
+    for f in files:
+        if token in f.upper():
+            return f
+    return None
+
+
+def _match_file(pattern_str, files):
+    """
+    Resolve a pattern cell against a file list.  Patterns are '|'-separated
+    alternatives tried in order; each is either 'auto:TOKEN' (see _match_token)
+    or a case-insensitive fnmatch glob.  Returns the filename or None.
+    """
+    for pat in (p.strip() for p in pattern_str.split("|")):
+        if not pat:
+            continue
+        if pat.lower().startswith(AUTO_PREFIX):
+            hit = _match_token(pat[len(AUTO_PREFIX):], files)
+        else:
+            hit = next((f for f in files if fnmatch.fnmatch(f.lower(), pat.lower())), None)
+        if hit:
+            return hit
+    return None
+
+
+def _swap_bitmaps(rt, node, override_map, folder, files, scale_mode, scale_u, scale_v, _seen=None):
     """
     Walk the node graph.  For every BitmapTexture whose display name (lower-cased)
     is a key in override_map, find a matching file in folder and update the
@@ -136,6 +304,7 @@ def _swap_bitmaps(rt, node, override_map, folder, scale_mode, scale_u, scale_v, 
     Returns the number of successful swaps.
 
     override_map : { "bitmap_display_name_lower": "pattern1|pattern2" }
+    files        : image filenames in folder (from _list_image_files)
     scale_mode   : "realworld"  → sets realWorldScale=True,  scale_u/v in cm
                    "tiling"     → sets realWorldScale=False, scale_u/v as tile counts
     """
@@ -163,16 +332,7 @@ def _swap_bitmaps(rt, node, override_map, folder, scale_mode, scale_u, scale_v, 
         if not pattern_str:
             return 0
 
-        patterns = [p.strip() for p in pattern_str.split("|") if p.strip()]
-        matched = None
-        for pat in patterns:
-            for f in os.listdir(folder):
-                if fnmatch.fnmatch(f.lower(), pat.lower()) and os.path.splitext(f)[1].lower() in IMAGE_EXTS:
-                    matched = f
-                    break
-            if matched:
-                break
-
+        matched = _match_file(pattern_str, files)
         if not matched:
             return 0
 
@@ -195,12 +355,12 @@ def _swap_bitmaps(rt, node, override_map, folder, scale_mode, scale_u, scale_v, 
     count = 0
     try:
         for i in range(1, rt.getNumSubMtls(node) + 1):
-            count += _swap_bitmaps(rt, rt.getSubMtl(node, i), override_map, folder, scale_mode, scale_u, scale_v, _seen)
+            count += _swap_bitmaps(rt, rt.getSubMtl(node, i), override_map, folder, files, scale_mode, scale_u, scale_v, _seen)
     except Exception:
         pass
     try:
         for i in range(1, rt.getNumSubTexmaps(node) + 1):
-            count += _swap_bitmaps(rt, rt.getSubTexmap(node, i), override_map, folder, scale_mode, scale_u, scale_v, _seen)
+            count += _swap_bitmaps(rt, rt.getSubTexmap(node, i), override_map, folder, files, scale_mode, scale_u, scale_v, _seen)
     except Exception:
         pass
     return count
@@ -229,15 +389,25 @@ class MatFromFolderOperator(QtCore.QObject):
 
     Folder path = root_folder / subfolder_column_value
     If no subfolder column is set the root folder is used directly.
+
+    The captured source material is also written to a sidecar .mat (next to
+    the scene by default) so the template keeps working after the material
+    leaves the scene / Slate Material Editor.  Pattern cells accept
+    'auto:TOKEN' (derived from the bitmap node name when Auto pattern is on)
+    next to plain globs.
     """
     status_changed = QtCore.Signal(str, bool)
 
     def __init__(self, context=None):
         super().__init__()
         self.rt = context.get("rt") if context else None
+        self.instance_id = context.get("instance_id", "") if context else ""
 
         self.source_mat_name   = ""
         self.source_mat_handle = None
+        self.source_mat_path   = ""     # sidecar .mat holding a copy of the source material
+        self._sidecar_cache    = None   # (path, mtime, lib, mat) — loaded once per session
+        self.auto_pattern      = True   # blank pattern rows resolve from the node name (COL, ROUGH …)
 
         self.folder_root        = ""
         self.folder_root_mode   = "static"   # "static" | "column"
@@ -283,8 +453,11 @@ class MatFromFolderOperator(QtCore.QObject):
 
     def _build_source_group(self):
         grp = QtWidgets.QGroupBox("1.  Source Material")
-        lay = QtWidgets.QHBoxLayout(grp)
+        vlay = QtWidgets.QVBoxLayout(grp)
+        vlay.setSpacing(4)
+        lay = QtWidgets.QHBoxLayout()
         lay.setSpacing(6)
+        vlay.addLayout(lay)
 
         self.combo_source = _ScanOnOpenCombo(self._refresh_material_list)
         self.combo_source.setMinimumWidth(200)
@@ -311,6 +484,42 @@ class MatFromFolderOperator(QtCore.QObject):
         btn_refresh.clicked.connect(self._refresh_material_list)
         self.btn_capture.clicked.connect(self._capture_bitmaps)
         self.combo_source.currentTextChanged.connect(lambda t: setattr(self, "source_mat_name", t))
+
+        # Sidecar .mat — a copy of the source material that outlives the SME view
+        row_side = QtWidgets.QHBoxLayout()
+        row_side.setSpacing(6)
+        lbl_side = QtWidgets.QLabel("Sidecar .mat:")
+        lbl_side.setToolTip(
+            "Capture Bitmaps also writes the source material to this .mat file.\n"
+            "When the material is no longer in the scene (e.g. its SME tab was\n"
+            "removed) the operator loads it from here instead of failing.\n"
+            "Render workers read the same path, so keep it on the NAS."
+        )
+        self.edit_source_path = QtWidgets.QLineEdit()
+        self.edit_source_path.setPlaceholderText(
+            "auto:  <scene folder>/VariationMGR_sources/<scene>_<material>.mat"
+        )
+        self.edit_source_path.setToolTip(
+            "Leave empty to save next to the scene on capture.\n"
+            "A relative path resolves against the scene folder."
+        )
+        btn_side_browse = QtWidgets.QPushButton("...")
+        btn_side_browse.setFixedWidth(28)
+        self.btn_save_sidecar = QtWidgets.QPushButton("Save")
+        self.btn_save_sidecar.setToolTip("Write the selected source material to the sidecar .mat now.")
+        self.lbl_sidecar_state = QtWidgets.QLabel("")
+        self.lbl_sidecar_state.setStyleSheet("color: #aaa;")
+        row_side.addWidget(lbl_side)
+        row_side.addWidget(self.edit_source_path, stretch=1)
+        row_side.addWidget(btn_side_browse)
+        row_side.addWidget(self.btn_save_sidecar)
+        row_side.addWidget(self.lbl_sidecar_state)
+        vlay.addLayout(row_side)
+
+        self.edit_source_path.textChanged.connect(self._on_source_path_changed)
+        btn_side_browse.clicked.connect(self._browse_sidecar)
+        self.btn_save_sidecar.clicked.connect(self._save_sidecar_clicked)
+        self._update_sidecar_state()
 
         return grp
 
@@ -406,7 +615,7 @@ class MatFromFolderOperator(QtCore.QObject):
         self.edit_scale_default_u = QtWidgets.QLineEdit("100cm")
         self.edit_scale_default_u.setFixedWidth(60)
         self.edit_scale_default_u.setToolTip(
-            "Real-world width used when METADATA.txt is absent.\n"
+            "Real-world width used when no metadata.json / METADATA.txt is found.\n"
             "Any unit accepted: 50cm  ·  1m  ·  300mm"
         )
         rws_lay.addWidget(self.edit_scale_default_u)
@@ -414,11 +623,17 @@ class MatFromFolderOperator(QtCore.QObject):
         self.edit_scale_default_v = QtWidgets.QLineEdit("100cm")
         self.edit_scale_default_v.setFixedWidth(60)
         self.edit_scale_default_v.setToolTip(
-            "Real-world height used when METADATA.txt is absent.\n"
+            "Real-world height used when no metadata.json / METADATA.txt is found.\n"
             "Any unit accepted: 50cm  ·  1m  ·  300mm"
         )
         rws_lay.addWidget(self.edit_scale_default_v)
-        self.chk_metadata = QtWidgets.QCheckBox("Override with METADATA.txt when found")
+        self.chk_metadata = QtWidgets.QCheckBox("Use texture size from metadata")
+        self.chk_metadata.setToolTip(
+            "Reads the physical size from the material folder:\n"
+            "  metadata.json  →  TEXTURE_SIZE.cm.width / height   (Reawote / Unlit-Manager)\n"
+            "  METADATA.txt   →  '31,7 x 31,7 cm'                   (legacy)\n"
+            "Falls back to Default W / H when neither is found."
+        )
         self.chk_metadata.setChecked(True)
         rws_lay.addWidget(self.chk_metadata)
         rws_lay.addStretch()
@@ -530,11 +745,31 @@ class MatFromFolderOperator(QtCore.QObject):
         hint = QtWidgets.QLabel(
             "Rows are populated by Capture Bitmaps.  "
             "Fill in a pattern to replace that bitmap node — leave blank to keep it unchanged.  "
-            "Use  *  as wildcard and  |  as OR fallback  (e.g.  *rough*|*gloss*)."
+            "Use  *  as wildcard and  |  as OR fallback  (e.g.  *rough*|*gloss*).  "
+            "auto:COL  matches by map token (COL, then aliases DIFF / ALBEDO …), case-insensitive;  "
+            "with Auto pattern on, blank rows get it from the node name."
         )
         hint.setStyleSheet("color: #888; font-size: 11px;")
         hint.setWordWrap(True)
         lay.addWidget(hint)
+
+        row_auto = QtWidgets.QHBoxLayout()
+        self.chk_auto_pattern = QtWidgets.QCheckBox("Auto pattern from bitmap name")
+        self.chk_auto_pattern.setChecked(self.auto_pattern)
+        self.chk_auto_pattern.setToolTip(
+            "Name your bitmap nodes after the map token — COL, ROUGH, METAL, NRM, DISP16 …\n"
+            "(any case, anywhere in the name) — and blank pattern cells resolve as auto:TOKEN.\n"
+            "Typed patterns always win.  Capture pre-fills the cells so you can see and edit them."
+        )
+        self.btn_auto_fill = QtWidgets.QPushButton("Fill blanks")
+        self.btn_auto_fill.setToolTip("Write the auto pattern into every blank pattern cell now.")
+        row_auto.addWidget(self.chk_auto_pattern)
+        row_auto.addWidget(self.btn_auto_fill)
+        row_auto.addStretch()
+        lay.addLayout(row_auto)
+
+        self.chk_auto_pattern.toggled.connect(lambda v: setattr(self, "auto_pattern", v))
+        self.btn_auto_fill.clicked.connect(self._fill_auto_patterns)
 
         self.ov_table = QtWidgets.QTableWidget(0, 2)
         self.ov_table.setHorizontalHeaderLabels(["Captured Bitmap Node", "Pattern(s)"])
@@ -589,6 +824,37 @@ class MatFromFolderOperator(QtCore.QObject):
             })
         return result
 
+    def _effective_overrides(self):
+        """Override rows as executed: blank patterns become auto:TOKEN when Auto pattern is on."""
+        rows = self._read_overrides()
+        if self.auto_pattern:
+            for ov in rows:
+                if not ov["pattern"].strip():
+                    ov["pattern"] = _auto_pattern(ov["bitmap"])
+        return rows
+
+    def _fill_auto_patterns(self):
+        """Write the auto pattern into blank pattern cells; typed patterns are kept."""
+        filled = 0
+        for row in range(self.ov_table.rowCount()):
+            bmp_item = self.ov_table.item(row, 0)
+            pat_item = self.ov_table.item(row, 1)
+            if pat_item is not None and pat_item.text().strip():
+                continue
+            pattern = _auto_pattern(bmp_item.text() if bmp_item else "")
+            if not pattern:
+                continue
+            if pat_item is None:
+                self.ov_table.setItem(row, 1, QtWidgets.QTableWidgetItem(pattern))
+            else:
+                pat_item.setText(pattern)
+            filled += 1
+        if filled:
+            self._set_status(f"Auto pattern filled {filled} blank row(s).")
+        else:
+            self._set_status("No blank rows with a recognised map token (COL, ROUGH, NRM …).", True)
+        return filled
+
     # -----------------------------------------------------------------------
     # Source material
     # -----------------------------------------------------------------------
@@ -638,18 +904,195 @@ class MatFromFolderOperator(QtCore.QObject):
         else:
             bitmaps = _DEMO_BITMAPS
 
+        # Re-capturing must not throw away patterns already typed for the same node names.
+        previous = {
+            ov["bitmap"].lower(): ov["pattern"]
+            for ov in self._read_overrides() if ov["pattern"].strip()
+        }
         self.source_mat_name = mat_name
         self.ov_table.setRowCount(0)
         for bmp in bitmaps:
-            self._add_override_row(bitmap_name=bmp)
+            pattern = previous.get(bmp.lower(), "")
+            if not pattern and self.auto_pattern:
+                pattern = _auto_pattern(bmp)
+            self._add_override_row(bitmap_name=bmp, pattern=pattern)
 
         count = len(bitmaps)
         self.lbl_capture_info.setText(f"{count} bitmap(s) found.")
         self.lbl_capture_info.setStyleSheet("color: #66ff66;" if count else "color: #ff6666;")
+
+        sidecar_msg, sidecar_err = "", False
+        if self.rt:
+            sidecar_msg = self._save_sidecar(mat)
+            sidecar_err = not sidecar_msg.startswith("Sidecar saved")
+
         if count:
-            self._set_status(f"Captured {count} bitmap(s) from '{mat_name}'.")
+            self._set_status(f"Captured {count} bitmap(s) from '{mat_name}'.  {sidecar_msg}".rstrip(), sidecar_err)
         else:
-            self._set_status(f"No BitmapTexture nodes found in '{mat_name}'.", True)
+            self._set_status(f"No BitmapTexture nodes found in '{mat_name}'.  {sidecar_msg}".rstrip(), True)
+
+    # -----------------------------------------------------------------------
+    # Sidecar .mat
+    # -----------------------------------------------------------------------
+
+    def _on_source_path_changed(self, text):
+        self.source_mat_path = text.strip()
+        self._sidecar_cache = None
+        self._update_sidecar_state()
+
+    def _browse_sidecar(self):
+        start = self.source_mat_path or self._default_sidecar_path(self.source_mat_name) or ""
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self.main_widget, "Sidecar Material Library", start, "Material Library (*.mat)"
+        )
+        if path:
+            if not path.lower().endswith(".mat"):
+                path += ".mat"
+            self.edit_source_path.setText(path)
+
+    def _scene_folder(self):
+        if not self.rt:
+            return ""
+        try:
+            return str(self.rt.maxFilePath or "")
+        except Exception:
+            return ""
+
+    def _default_sidecar_path(self, mat_name):
+        """<scene folder>/VariationMGR_sources/<scene>_<material>.mat — "" while the scene is unsaved."""
+        scene_dir = self._scene_folder()
+        if not scene_dir or not mat_name or mat_name == "-- Select --":
+            return ""
+        try:
+            scene_stem = os.path.splitext(str(self.rt.maxFileName))[0] or "scene"
+        except Exception:
+            scene_stem = "scene"
+        safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", mat_name).strip("_") or "material"
+        return os.path.join(scene_dir, "VariationMGR_sources", f"{scene_stem}_{safe}.mat")
+
+    def _resolved_sidecar_path(self):
+        """Absolute sidecar path; a relative path resolves against the scene folder."""
+        p = self.source_mat_path
+        if not p:
+            return ""
+        if not os.path.isabs(p):
+            scene_dir = self._scene_folder()
+            p = os.path.join(scene_dir, p) if scene_dir else p
+        return os.path.normpath(p)
+
+    def _update_sidecar_state(self):
+        path = self._resolved_sidecar_path()
+        if not path:
+            txt, col = "(auto on capture)", "#aaa"
+        elif os.path.isfile(path):
+            txt, col = "found", "#66ff66"
+        else:
+            txt, col = "missing", "#ff6666"
+        self.lbl_sidecar_state.setText(txt)
+        self.lbl_sidecar_state.setStyleSheet(f"color: {col};")
+        self.lbl_sidecar_state.setToolTip(path)
+
+    def _find_scene_material(self, name):
+        if not self.rt or name in ("-- Select --", ""):
+            return None
+        try:
+            for m in self.rt.sceneMaterials:
+                if m.name == name:
+                    return m
+        except Exception:
+            pass
+        return None
+
+    def _save_sidecar(self, mat):
+        """
+        Write `mat` as a single-material library to the sidecar path (UI field,
+        else next to the scene).  Returns a one-line status; never raises.
+        """
+        path = self._resolved_sidecar_path() or self._default_sidecar_path(str(mat.name))
+        if not path:
+            return "Sidecar not written: save the scene first or set a sidecar .mat path."
+        ok = False
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            try:
+                lib = self.rt.materialLibrary(mat)          # constructor with members
+            except Exception:
+                lib = self.rt.materialLibrary()             # empty library, then append
+                self.rt.append(lib, mat)
+            ok = bool(self.rt.saveTempMaterialLibrary(lib, path))
+        except Exception as e:
+            print(f"[MatFromFolder] Sidecar save failed for {path}: {e}")
+        if not ok:
+            self._update_sidecar_state()
+            return f"Sidecar save FAILED: {path}"
+        self._sidecar_cache = None
+        if self.source_mat_path:
+            self._update_sidecar_state()
+        else:
+            self.edit_source_path.setText(path)   # textChanged → state refresh
+        return f"Sidecar saved: {os.path.basename(path)}"
+
+    def _save_sidecar_clicked(self):
+        if not self.rt:
+            self._set_status("[STUB] Would save the source material to the sidecar .mat.")
+            return
+        mat = self._find_scene_material(self.combo_source.currentText())
+        if mat is None:
+            self._set_status("Select a source material that is present in the scene first.", True)
+            return
+        self.source_mat_name   = str(mat.name)
+        self.source_mat_handle = self.rt.GetHandleByAnim(mat)
+        msg = self._save_sidecar(mat)
+        self._set_status(msg, not msg.startswith("Sidecar saved"))
+
+    def _load_sidecar_material(self):
+        """Source material from the sidecar .mat (cached per path + mtime), or None."""
+        path = self._resolved_sidecar_path()
+        if not path or not os.path.isfile(path):
+            return None
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            return None
+        cache = self._sidecar_cache
+        if cache and cache[0] == path and cache[1] == mtime:
+            return cache[3]
+        try:
+            lib = self.rt.loadTempMaterialLibrary(path)
+            mats = list(lib)
+        except Exception as e:
+            print(f"[MatFromFolder] Sidecar load failed for {path}: {e}")
+            return None
+        want = (self.source_mat_name or "").lower()
+        mat = next((m for m in mats if str(m.name).lower() == want), None)
+        if mat is None and len(mats) == 1:
+            mat = mats[0]
+        if mat is None:
+            print(f"[MatFromFolder] '{self.source_mat_name}' not found in sidecar {path}")
+            return None
+        self._sidecar_cache = (path, mtime, lib, mat)   # keep lib referenced → material stays alive
+        return mat
+
+    def _resolve_source_material(self):
+        """
+        Source lookup order: scene material by name → session handle → sidecar .mat.
+        Returns (material, origin) with origin in {"scene", "handle", "sidecar"}, or (None, "").
+        """
+        mat = self._find_scene_material(self.source_mat_name)
+        if mat is not None:
+            self.source_mat_handle = self.rt.GetHandleByAnim(mat)
+            return mat, "scene"
+        if self.source_mat_handle:
+            try:
+                m = self.rt.GetAnimByHandle(self.source_mat_handle)
+                if m is not None and self.rt.isKindOf(m, self.rt.Material):
+                    return m, "handle"
+            except Exception:
+                pass
+        mat = self._load_sidecar_material()
+        if mat is not None:
+            return mat, "sidecar"
+        return None, ""
 
     # -----------------------------------------------------------------------
     # Target / folder handlers
@@ -784,38 +1227,39 @@ class MatFromFolderOperator(QtCore.QObject):
             except ValueError:
                 scale_v = 1.0
         else:  # realworld
-            metadata = _read_scale_from_metadata(folder) if self.scale_use_metadata else None
+            metadata = None
+            if self.scale_use_metadata:
+                metadata = _read_scale_from_metadata(folder)
+                norm = os.path.normpath(folder)
+                if metadata is None and _RES_TAG_RE.match(os.path.basename(norm) or ""):
+                    # Root points straight at a 4K/8K folder — metadata lives one level up.
+                    metadata = _read_scale_from_metadata(os.path.dirname(norm))
             if metadata:
                 scale_u, scale_v = metadata
             else:
                 scale_u = _parse_size_to_cm(self.scale_default_u)
                 scale_v = _parse_size_to_cm(self.scale_default_v)
 
-        # 4. Clone source material — look up by name first (handles are session-specific).
-        if not self.source_mat_name:
+        # 4. Clone source material — scene by name, then session handle, then sidecar .mat.
+        if not self.source_mat_name and not self.source_mat_path:
             self._set_status("No source material captured — use 'Capture Bitmaps' first.", True)
             return
-        source_mat = None
-        for m in self.rt.sceneMaterials:
-            if m.name == self.source_mat_name:
-                source_mat = m
-                self.source_mat_handle = self.rt.GetHandleByAnim(m)
-                break
-        if source_mat is None and self.source_mat_handle:
-            source_mat = self.rt.GetAnimByHandle(self.source_mat_handle)
+        source_mat, origin = self._resolve_source_material()
         if source_mat is None:
-            self._set_status("Source material no longer in scene — re-capture.", True)
+            self._set_status(
+                "Source material not in scene and no sidecar .mat found — "
+                "re-capture, or point 'Sidecar .mat' at a saved copy.", True)
             return
         clone = self.rt.copy(source_mat)
 
         # 5. Swap bitmaps
-        overrides = self._read_overrides()
         override_map = {
             ov["bitmap"].lower(): ov["pattern"]
-            for ov in overrides
+            for ov in self._effective_overrides()
             if ov["bitmap"] and ov["pattern"]
         }
-        swapped = _swap_bitmaps(self.rt, clone, override_map, res_folder, self.scale_mode, scale_u, scale_v)
+        files = _list_image_files(res_folder)
+        swapped = _swap_bitmaps(self.rt, clone, override_map, res_folder, files, self.scale_mode, scale_u, scale_v)
 
         # 6. Assign to target
         if self.target_mode in ("object", "multisub"):
@@ -864,6 +1308,8 @@ class MatFromFolderOperator(QtCore.QObject):
             return
 
         res_label = os.path.basename(res_folder) if res_folder != folder else "root"
+        if origin == "sidecar":
+            res_label = f"source: sidecar .mat  ·  {res_label}"
         if self.scale_mode == "tiling":
             scale_info = f"tiling {scale_u}×{scale_v}"
         else:
@@ -887,6 +1333,8 @@ class MatFromFolderOperator(QtCore.QObject):
         return {
             "source_mat_name":    self.source_mat_name,
             "source_mat_handle":  self.source_mat_handle,
+            "source_mat_path":    self.source_mat_path,
+            "auto_pattern":       self.auto_pattern,
             "folder_root":        self.folder_root,
             "folder_root_mode":   self.folder_root_mode,
             "folder_root_column": self.folder_root_column,
@@ -909,6 +1357,9 @@ class MatFromFolderOperator(QtCore.QObject):
     def deserialize(self, data):
         self.source_mat_name    = data.get("source_mat_name",    "")
         self.source_mat_handle  = data.get("source_mat_handle",  None)
+        self.source_mat_path    = data.get("source_mat_path",    "")
+        # Templates saved before Auto pattern existed keep their blank rows blank.
+        self.auto_pattern       = bool(data.get("auto_pattern",  False))
         self.folder_root        = data.get("folder_root",        "")
         self.folder_root_mode   = data.get("folder_root_mode",   "static")
         self.folder_root_column = data.get("folder_root_column", "")
@@ -927,6 +1378,9 @@ class MatFromFolderOperator(QtCore.QObject):
         self.multisub_slot      = data.get("multisub_slot",      1)
 
         self.edit_folder.setText(self.folder_root)
+        self.edit_source_path.setText(self.source_mat_path)
+        self._update_sidecar_state()
+        self.chk_auto_pattern.setChecked(self.auto_pattern)
         self.chk_root_from_column.blockSignals(True)
         self.chk_root_from_column.setChecked(self.folder_root_mode == "column")
         self.chk_root_from_column.blockSignals(False)

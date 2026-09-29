@@ -31,7 +31,7 @@ The code runs in three environments:
 Operators live under `Operators/` and must implement `get_ui()`, `execute(row_data)`, `serialize()`, `deserialize(data)`, and `on_columns_changed(columns)`. Current operators:
 
 - `FloorGeneratorOperator`: Drives a FloorGenerator modifier and CoronaMultiMap textures from CSV columns (plank name, dimensions, laying pattern).
-- `MatFromFolderOperator`: Clones a source material, swaps its BitmapTexture nodes using file-pattern matching against a texture folder, and assigns the result to a target object/material/multi-sub slot. Supports real-world scale from `METADATA.txt` or tiling.
+- `MatFromFolderOperator`: Clones a source material, swaps its BitmapTexture nodes using file-pattern matching against a texture folder, and assigns the result to a target object/material/multi-sub slot. Supports real-world scale from `metadata.json` (`TEXTURE_SIZE.cm`) or legacy `METADATA.txt`, tiling, a sidecar `.mat` copy of the source material (survives the material leaving the scene/SME), and `auto:TOKEN` patterns derived from bitmap node names (COL, ROUGH, NRM …).
 - `MultiSubLibOperator`: Replaces sub-materials in a Multi-Sub material from a `.mat` library file, driven by a CSV column.
 - `LayerVisibilityOperator`: Toggles child layer visibility under a parent layer based on a CSV column value. Supports `&`-separated multi-layer activation.
 - `HexColorOperator`: Drives a CoronaColor or Color_Correction map color from a hex column value.
