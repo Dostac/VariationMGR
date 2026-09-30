@@ -20,6 +20,7 @@ if _script_dir not in sys.path:
     sys.path.insert(0, _script_dir)
 
 import variation_core as vcore
+import sheet_table
 
 
 class _NoWheelFilter(QtCore.QObject):
@@ -30,6 +31,53 @@ class _NoWheelFilter(QtCore.QObject):
             event.ignore()
             return True
         return False
+
+
+class _IssuesPopup(QtWidgets.QFrame):
+    """Drop-down list of configuration problems under the status button.
+    Each entry is clickable and jumps to the cause (see _goto_issue)."""
+
+    COLORS = {"error": "#e05252", "warning": "#e0b341"}
+
+    def __init__(self, issues, on_pick, parent=None):
+        super().__init__(parent, QtCore.Qt.Popup)
+        self.setFrameShape(QtWidgets.QFrame.StyledPanel)
+        self.setMinimumWidth(460)
+        self.setMaximumWidth(620)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(10, 10, 10, 10)
+        lay.setSpacing(6)
+        if not issues:
+            lay.addWidget(QLabel("No problems found in the camera, naming, row range or column setup."))
+            return
+        head = QLabel("Click a problem to jump to it. Operator problems show in their own tabs.")
+        head.setWordWrap(True)
+        head.setStyleSheet("color: gray;")
+        lay.addWidget(head)
+        for issue in issues:
+            color = self.COLORS.get(issue["level"], "#e0b341")
+            mark = "\u26d4" if issue["level"] == "error" else "\u26a0"
+            btn = QPushButton()
+            btn.setFlat(True)
+            btn.setCursor(QtCore.Qt.PointingHandCursor)
+            btn.setDefault(False)
+            btn.setAutoDefault(False)
+            row = QHBoxLayout(btn)
+            row.setContentsMargins(6, 4, 6, 4)
+            icon = QLabel(mark)
+            icon.setStyleSheet(f"color: {color}; font-size: 14px;")
+            icon.setAlignment(QtCore.Qt.AlignTop)
+            text = QLabel(issue["message"])
+            text.setWordWrap(True)
+            text.setTextInteractionFlags(QtCore.Qt.NoTextInteraction)
+            text.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents)
+            icon.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents)
+            row.addWidget(icon)
+            row.addWidget(text, stretch=1)
+            text.adjustSize()
+            btn.setMinimumHeight(max(34, text.heightForWidth(540) + 12))
+            btn.clicked.connect(lambda _=False, it=issue: (self.close(), on_pick(it)))
+            lay.addWidget(btn)
 
 
 class VariationManager(QtWidgets.QDialog):
@@ -168,9 +216,14 @@ class VariationManager(QtWidgets.QDialog):
         preview_font.setItalic(True)
         self.lbl_preview.setFont(preview_font)
 
+        self.lbl_pattern_issue = QLabel("")
+        self.lbl_pattern_issue.setWordWrap(True)
+        self.lbl_pattern_issue.setVisible(False)
+
         naming_vbox.addLayout(naming_input)
         naming_vbox.addLayout(token_row)
         naming_vbox.addWidget(self.lbl_preview)
+        naming_vbox.addWidget(self.lbl_pattern_issue)
 
         # B. Render Settings
         cam_group = QGroupBox("Render Settings")
@@ -191,8 +244,14 @@ class VariationManager(QtWidgets.QDialog):
 
         col_row = QHBoxLayout()
         col_row.setSpacing(8)
+        # Shown when the camera setup has a problem (see _refresh_issues).
+        self.lbl_cam_issue = QLabel("\u26a0")
+        self.lbl_cam_issue.setStyleSheet("color: #e05252; font-size: 16px;")
+        self.lbl_cam_issue.setVisible(False)
+
         col_row.addWidget(self.radio_cam_column)
         col_row.addWidget(self.combo_cam_column)
+        col_row.addWidget(self.lbl_cam_issue)
         col_row.addStretch()
 
         cam_vbox.addWidget(self.radio_cam_active)
@@ -266,7 +325,9 @@ class VariationManager(QtWidgets.QDialog):
         toolbar.addWidget(self.btn_import_csv)
         toolbar.addWidget(self.btn_more)
 
-        self.table = QTableWidget(0, 0)
+        # Excel-like sheet: selected vs editing states, copy/paste/cut/clear,
+        # undo, anchored and tiled paste. See sheet_table.py.
+        self.table = sheet_table.SheetTable(0, 0)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.horizontalHeader().setSectionsMovable(True)
@@ -279,7 +340,6 @@ class VariationManager(QtWidgets.QDialog):
         # Keep row numbers in sync with the header=row1 / data=row2 convention.
         self.table.model().rowsInserted.connect(self._update_row_headers)
         self.table.model().rowsRemoved.connect(self._update_row_headers)
-        self.table.installEventFilter(self)
 
         data_layout.addLayout(toolbar)
         data_layout.addWidget(self.table)
@@ -319,10 +379,19 @@ class VariationManager(QtWidgets.QDialog):
 
         # --- BOTTOM BAR ---
         bottom_bar = QHBoxLayout()
+        # Setup check: camera mode, naming scheme, row range and columns.
+        # Green when fine, amber/red with a count when not; click for the list.
+        self.btn_issues = QToolButton()
+        self.btn_issues.setAutoRaise(True)
+        self.btn_issues.setMinimumHeight(40)
+        self.btn_issues.setCursor(QtCore.Qt.PointingHandCursor)
+        self.btn_issues.clicked.connect(self._show_issues)
+        self._issues = []
         self.btn_run_row = QPushButton("▶ Run Selected Row")
         _mat_button(self.btn_run_row, 180)
         self.btn_batch_render = QPushButton("▶  Open Batch Renderer")
         _mat_button(self.btn_batch_render, 180)
+        bottom_bar.addWidget(self.btn_issues)
         bottom_bar.addStretch()
         bottom_bar.addWidget(self.btn_run_row)
         bottom_bar.addWidget(self.btn_batch_render)
@@ -342,12 +411,27 @@ class VariationManager(QtWidgets.QDialog):
 
         self.edt_pattern.textChanged.connect(self._sanitize_pattern)
         self.table.itemChanged.connect(self._on_cell_changed)
+        self.table.cellsEdited.connect(self._on_cells_edited)
         self.radio_cam_active.toggled.connect(lambda c: self._on_cam_mode_toggled("active", c))
         self.radio_cam_column.toggled.connect(lambda c: self._on_cam_mode_toggled("column", c))
         self.radio_cam_all.toggled.connect(lambda c: self._on_cam_mode_toggled("all", c))
-        self.combo_cam_column.currentTextChanged.connect(lambda t: setattr(self, 'render_camera_column', t))
+        self.combo_cam_column.currentIndexChanged.connect(self._on_cam_column_picked)
         self.edt_row_range.textChanged.connect(self._on_row_range_text)
         self.columns_changed.connect(self._on_cam_columns_changed)
+
+        # Re-check the setup shortly after anything that affects it changes.
+        self._issues_timer = QtCore.QTimer(self)
+        self._issues_timer.setSingleShot(True)
+        self._issues_timer.setInterval(400)
+        self._issues_timer.timeout.connect(self._refresh_issues)
+        for sig in (self.edt_pattern.textChanged, self.edt_row_range.textChanged,
+                    self.combo_cam_column.currentIndexChanged, self.columns_changed,
+                    self.table.itemChanged, self.table.cellsEdited,
+                    self.table.model().rowsInserted, self.table.model().rowsRemoved):
+            sig.connect(lambda *_: self._issues_timer.start())
+        for radio in (self.radio_cam_active, self.radio_cam_all, self.radio_cam_column):
+            radio.toggled.connect(lambda *_: self._issues_timer.start())
+        self._last_issue_check = 0.0
 
     def _disable_combo_wheel(self, root):
         """Install the no-wheel filter on every combo and spin box under `root`.
@@ -528,15 +612,140 @@ class VariationManager(QtWidgets.QDialog):
         self.combo_cam_column.setEnabled(mode == "column")
 
     def _on_cam_columns_changed(self, columns):
+        # The placeholder is display-only: render_camera_column stays "" until
+        # a real column is picked. A saved column that no longer exists is kept
+        # (shown as "(missing)") so the setup check can name it, and so it
+        # rebinds if a column with that name comes back.
         saved = self.render_camera_column
+        if saved == vcore.CAMERA_COLUMN_PLACEHOLDER:
+            saved = ""
         self.combo_cam_column.blockSignals(True)
         self.combo_cam_column.clear()
-        self.combo_cam_column.addItem("-- Select Column --")
+        self.combo_cam_column.addItem(vcore.CAMERA_COLUMN_PLACEHOLDER)
         self.combo_cam_column.addItems(columns)
-        idx = self.combo_cam_column.findText(saved)
+        if saved and saved not in columns:
+            self.combo_cam_column.addItem(f"{saved} (missing)", "__missing__")
+            idx = self.combo_cam_column.count() - 1
+        else:
+            idx = self.combo_cam_column.findText(saved) if saved else 0
         self.combo_cam_column.setCurrentIndex(idx if idx != -1 else 0)
         self.combo_cam_column.blockSignals(False)
-        self.render_camera_column = self.combo_cam_column.currentText()
+        self.render_camera_column = saved
+
+    def _on_cam_column_picked(self, index):
+        if index <= 0:
+            self.render_camera_column = ""
+        elif self.combo_cam_column.itemData(index) == "__missing__":
+            pass   # keep the stored (missing) name until a real column is picked
+        else:
+            self.render_camera_column = self.combo_cam_column.itemText(index)
+
+    # --- SETUP CHECK ---
+
+    def _scene_camera_names(self):
+        """(camera node names, CoronaCam names) from the scene; None when unknown."""
+        try:
+            cams = list(rt.cameras)
+            names = [str(c.name) for c in cams]
+        except Exception:
+            return None, None
+        corona = None
+        try:
+            cls = rt.CoronaCam
+            if cls is not None:
+                corona = [str(c.name) for c in cams if rt.isKindOf(c, cls)]
+        except Exception:
+            corona = None
+        return names, corona
+
+    def _refresh_issues(self, data=None):
+        import time
+        self._last_issue_check = time.monotonic()
+        try:
+            if data is None:
+                data = self._build_current_data()
+            cams, corona = self._scene_camera_names()
+            issues = vcore.validate_config(data, scene_cameras=cams, corona_cameras=corona)
+        except Exception as e:
+            print(f"VM: setup check failed: {e}")
+            return
+        self._issues = issues
+        errors = sum(1 for i in issues if i["level"] == "error")
+        warnings = len(issues) - errors
+        if errors:
+            color = "#e05252"
+            text = f"\u26d4  {errors} error{'s' if errors > 1 else ''}"
+            if warnings:
+                text += f", {warnings} warning{'s' if warnings > 1 else ''}"
+        elif warnings:
+            color = "#e0b341"
+            text = f"\u26a0  {warnings} warning{'s' if warnings > 1 else ''}"
+        else:
+            color = "#5cb85c"
+            text = "\u2713  Setup OK"
+        self.btn_issues.setText(text)
+        self.btn_issues.setStyleSheet(f"QToolButton {{ color: {color}; font-weight: bold; padding: 0 8px; }}")
+        self.btn_issues.setToolTip(
+            "\n".join(("\u26d4 " if i["level"] == "error" else "\u26a0 ") + i["message"] for i in issues[:6])
+            + ("\n…" if len(issues) > 6 else "")
+            if issues else "Camera, naming scheme, row range and columns look fine.")
+
+        cam = [i for i in issues if i["target"].get("kind") == "camera_column"
+               or (i["target"].get("kind") == "cell" and i["target"].get("column") == self.render_camera_column
+                   and self.render_camera_mode == "column")]
+        self.lbl_cam_issue.setVisible(bool(cam))
+        if cam:
+            level = "error" if any(i["level"] == "error" for i in cam) else "warning"
+            self.lbl_cam_issue.setStyleSheet(
+                f"color: {_IssuesPopup.COLORS[level]}; font-size: 16px;")
+            self.lbl_cam_issue.setToolTip("\n".join(i["message"] for i in cam))
+        pat = [i for i in issues if i["target"].get("kind") == "pattern"]
+        self.lbl_pattern_issue.setVisible(bool(pat))
+        if pat:
+            level = "error" if any(i["level"] == "error" for i in pat) else "warning"
+            self.lbl_pattern_issue.setStyleSheet(f"color: {_IssuesPopup.COLORS[level]};")
+            self.lbl_pattern_issue.setText("\u26a0 " + pat[0]["message"]
+                                           + (f"  (+{len(pat) - 1} more)" if len(pat) > 1 else ""))
+
+    def _show_issues(self):
+        self._refresh_issues()
+        popup = _IssuesPopup(self._issues, self._goto_issue, self)
+        popup.adjustSize()
+        anchor = self.btn_issues.mapToGlobal(QtCore.QPoint(0, 0))
+        popup.move(anchor.x(), anchor.y() - popup.sizeHint().height() - 4)
+        popup.show()
+
+    def _logical_column(self, name):
+        for c in range(self.table.columnCount()):
+            it = self.table.horizontalHeaderItem(c)
+            if it is not None and it.text() == name:
+                return c
+        return -1
+
+    def _goto_issue(self, issue):
+        t = issue.get("target", {})
+        kind = t.get("kind", "")
+        if kind == "camera_column":
+            if self.render_camera_mode == "column":
+                self.combo_cam_column.setFocus()
+                self.combo_cam_column.showPopup()
+            else:
+                self.radio_cam_column.setFocus()
+        elif kind == "pattern":
+            self.edt_pattern.setFocus()
+        elif kind == "row_range":
+            self.edt_row_range.setFocus()
+            self.edt_row_range.selectAll()
+        elif kind in ("cell", "column"):
+            col = self._logical_column(t.get("column", ""))
+            if col < 0:
+                return
+            self.table.setFocus()
+            if kind == "cell" and 0 <= t.get("row", -1) < self.table.rowCount():
+                self.table.setCurrentCell(t["row"], col)
+                self.table.scrollToItem(self.table.item(t["row"], col) or QTableWidgetItem())
+            else:
+                self.table.selectColumn(col)
 
     # --- SAVE / LOAD SYSTEM (SCENE ONLY) ---
 
@@ -633,6 +842,8 @@ class VariationManager(QtWidgets.QDialog):
                     cam_mode = data.get("render_camera_mode", "active")
                     self.render_camera_mode = cam_mode
                     self.render_camera_column = data.get("render_camera_column", "")
+                    if self.render_camera_column == vcore.CAMERA_COLUMN_PLACEHOLDER:
+                        self.render_camera_column = ""
                     if cam_mode == "column":
                         self.radio_cam_column.setChecked(True)
                     elif cam_mode == "all":
@@ -683,6 +894,7 @@ class VariationManager(QtWidgets.QDialog):
         self.update_prop_dropdown()
         self.columns_changed.emit(self.custom_properties)
         self.update_naming_preview()
+        self._refresh_issues()
         return loaded_data
 
     # ------------------------------------------------------------------
@@ -707,6 +919,11 @@ class VariationManager(QtWidgets.QDialog):
         except Exception as e:
             print(f"VM autosave: failed to build state: {e}")
             return
+        # Scene cameras can be renamed/deleted without touching this dialog,
+        # so re-run the setup check every few ticks even when nothing changed.
+        import time
+        if current_str != self._last_saved_str or time.monotonic() - self._last_issue_check > 6:
+            self._refresh_issues(current)
         if current_str == self._last_saved_str:
             return
         try:
@@ -895,91 +1112,9 @@ class VariationManager(QtWidgets.QDialog):
         else:
             self.cb_prop_tokens.addItem("-- No Properties --")
 
-    def eventFilter(self, obj, event):
-        if obj is self.table and event.type() == QtCore.QEvent.KeyPress:
-            if event.matches(QtGui.QKeySequence.Copy):
-                self._table_copy()
-                return True
-            if event.matches(QtGui.QKeySequence.Paste):
-                self._table_paste()
-                return True
-        return super().eventFilter(obj, event)
-
-    def _table_copy(self):
-        """Copy selected cells as TSV (Excel-compatible)."""
-        ranges = self.table.selectedRanges()
-        if not ranges:
-            item = self.table.currentItem()
-            if item:
-                QtWidgets.QApplication.clipboard().setText(item.text())
-            return
-        rng = ranges[0]
-        lines = []
-        for r in range(rng.topRow(), rng.bottomRow() + 1):
-            row_vals = []
-            for c in range(rng.leftColumn(), rng.rightColumn() + 1):
-                it = self.table.item(r, c)
-                row_vals.append(it.text() if it else "")
-            lines.append("\t".join(row_vals))
-        QtWidgets.QApplication.clipboard().setText("\n".join(lines))
-
-    def _table_paste(self):
-        """Paste TSV clipboard into the table, expanding from the current cell.
-
-        - Multi-cell clipboard (TSV with tabs/newlines): pastes as a rectangular
-          block starting at the current cell, growing rows/cols if needed.
-        - Single-value clipboard: fills every selected cell with that value.
-        """
-        text = QtWidgets.QApplication.clipboard().text()
-        if not text:
-            return
-
-        # Strip a single trailing newline (common when copying from Excel).
-        if text.endswith("\r\n"):
-            text = text[:-2]
-        elif text.endswith("\n") or text.endswith("\r"):
-            text = text[:-1]
-
-        rows = [line.split("\t") for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
-        is_block = len(rows) > 1 or (rows and len(rows[0]) > 1)
-
-        self.table.blockSignals(True)
-        try:
-            if is_block:
-                start_row = self.table.currentRow()
-                start_col = self.table.currentColumn()
-                if start_row < 0:
-                    start_row = 0
-                if start_col < 0:
-                    start_col = 0
-                for dr, row_vals in enumerate(rows):
-                    r = start_row + dr
-                    while r >= self.table.rowCount():
-                        self.table.insertRow(self.table.rowCount())
-                    for dc, val in enumerate(row_vals):
-                        c = start_col + dc
-                        if c >= self.table.columnCount():
-                            break  # don't auto-add columns; they have headers
-                        it = self.table.item(r, c)
-                        if it is None:
-                            it = QTableWidgetItem(val)
-                            self.table.setItem(r, c, it)
-                        else:
-                            it.setText(val)
-            else:
-                value = rows[0][0] if rows and rows[0] else ""
-                targets = self.table.selectedItems()
-                if not targets and self.table.currentItem():
-                    targets = [self.table.currentItem()]
-                for sel_item in targets:
-                    sel_item.setText(value)
-        finally:
-            self.table.blockSignals(False)
-
-        if self.table.currentItem():
-            self._on_cell_changed(self.table.currentItem())
-        else:
-            self.update_naming_preview()
+    def _on_cells_edited(self):
+        """Bulk sheet edit (paste, cut, clear, undo/redo): refresh the preview."""
+        self.update_naming_preview()
 
     def _on_cell_changed(self, item):
         """Sanitize cell text on edit, then refresh the naming preview."""
@@ -1105,6 +1240,8 @@ class VariationManager(QtWidgets.QDialog):
             new_name, ok = QtWidgets.QInputDialog.getText(self, "Rename Column", "New name:", text=old_name)
             if ok and new_name and new_name != old_name:
                 self.table.setHorizontalHeaderItem(c, QTableWidgetItem(new_name))
+                if self.render_camera_column == old_name:
+                    self.render_camera_column = new_name   # keep the camera binding
                 self.custom_properties[c] = new_name
                 self.update_prop_dropdown()
                 self.columns_changed.emit(self.custom_properties)

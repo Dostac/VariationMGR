@@ -142,6 +142,33 @@ The table is where most of your work happens.
 - `Edit CSV`: open the table in a temporary CSV file for live editing. The dropdown arrow on this button also gives you `Import CSV` and `Export CSV` for moving table data in and out of VariationMGR.
 - `Reset`: clear the current variation setup from both the UI and the scene file. This cannot be undone.
 
+#### Working in the table like a spreadsheet
+
+The table behaves like Excel. A cell is either **selected** (highlighted, with an outline on the current cell) or **editing** (a text cursor in the cell). Double-click, press `F2`, or just start typing to edit. Typing replaces what was in the cell. `Enter` finishes the edit and moves down.
+
+While cells are selected, and not being edited:
+
+- `Ctrl+C` copies them. They paste straight into Excel or Google Sheets, and back.
+- `Ctrl+V` pastes starting at the top-left selected cell, filling down and to the right. New rows are added when the paste runs past the bottom. Columns are never added, because they need a name first.
+- One copied value pastes into every selected cell.
+- Text with line breaks (a list copied from anywhere) pastes one line per cell, downwards.
+- If you select an area that is an exact multiple of what you copied, the copy repeats to fill it, as in Excel.
+- `Ctrl+X` cuts. `Delete` or `Backspace` clears the selected cells.
+- `Ctrl+Z` undoes a paste, clear or edit, and `Ctrl+Y` redoes it.
+
+While editing, these keys work on the text inside that one cell instead. Copy and paste follow the column order on screen, also after you drag a column to a new position.
+
+#### Setup check
+
+The button at the bottom-left of the window checks your setup. It shows green `Setup OK`, amber warnings or red errors. Click it to see the list, then click a problem to jump to the cell, column or setting that causes it. It checks:
+
+- the camera mode, for example `From Column` with no column picked, a column that was renamed away or deleted, empty camera cells, or camera names that aren't in the scene
+- the naming scheme, for example `[Property]` tokens without a matching column, or rows that would produce the same file name and overwrite each other
+- the row range, for example an invalid expression, or a range that matches no rows
+- the columns themselves, for example empty or duplicate column names
+
+Problems with the camera also show a ⚠ next to the camera column picker, and naming problems show under the preview. Operators are not part of this check: they show their own problems in their tabs.
+
 #### Practical advice
 
 - When making complex or many edits to the CSV data, use the edit CSV feature which allows you to edit the CSV data using an external program like Open office calc or Excell. This allows for greater flexibility than what the CSV editor in  

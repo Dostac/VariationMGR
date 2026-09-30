@@ -25,6 +25,8 @@ The code runs in three environments:
 - Scene data is serialized into the `.max` file custom property `VariationManagerData` as JSON.
 - Operator classes are loaded dynamically from the operators folder and executed against row data.
 - `variation_core.py` contains operator scanning, preference loading/saving, output-name token resolution, and compatibility helpers for saved operator state.
+- `variation_core.validate_config(data, scene_cameras, corona_cameras)` is a pure check of the scene-level setup (camera mode/column, naming scheme tokens and file-name clashes, row range, empty/duplicate headers). It feeds the Setup status button and popup at the bottom-left of the dialog (`_refresh_issues`, `_IssuesPopup`, `_goto_issue`). Operators are excluded on purpose, since they report in their own tabs. The camera column placeholder (`CAMERA_COLUMN_PLACEHOLDER`) is display-only and never stored. A deleted camera column stays stored and shows as "(missing)", and a rename carries the binding over.
+- `sheet_table.py` (`SheetTable`) is the table widget. It is Excel-like: selected vs editing states, TSV copy/cut/paste anchored at the top-left of the selection (a single value fills the selection, multiples tile, overflow adds rows but never columns), Delete clears, an undo/redo stack, and Enter moves down. Coordinates follow the visual column order. It accepts `ShortcutOverride` for the keys it handles, because 3ds Max's application shortcuts (Ctrl+V = Clone, Delete) otherwise steal them from a plain QTableWidget. Bulk edits write with signals blocked and emit `cellsEdited`. `main.py` reloads it before `VariationMGR`.
 
 ## Operator Catalog
 

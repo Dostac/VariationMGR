@@ -61,6 +61,7 @@ def _fresh(module_name):
 
 def launch_variation_manager():
     _fresh("variation_core")
+    _fresh("sheet_table")
     vm = _fresh("VariationMGR")
     vm.main()
 
